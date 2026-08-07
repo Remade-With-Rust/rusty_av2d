@@ -108,8 +108,21 @@ settings.set_apply_grain(true);
 let mut dec = Decoder::with_settings(&settings)?;
 ```
 
-The C ABI (`dav1d_open`, `dav1d_send_data`, `dav1d_get_picture`, …) is also
-exported, so the crate can be linked as a `staticlib` by non-Rust callers.
+### The C ABI
+
+A C ABI is also exported (`dav1d_open`, `dav1d_send_data`, `dav1d_get_picture`,
+…) so the crate can be linked as a `staticlib` by non-Rust callers. It is on by
+default via the `capi` feature.
+
+Those symbol names are inherited from the dav1d lineage, which means they
+**collide at link time with any other decoder from that lineage** — notably
+`rav1d`. If you link both, turn the C ABI off:
+
+```toml
+rusty_av2d = { version = "0.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+```
+
+The safe Rust API is unaffected either way.
 
 ## Limitations
 
