@@ -44,9 +44,18 @@ partial superblocks). No dimension restriction remains.
 
 ## Robustness
 
-Corrupt input is fuzz-tested (bit-flips, truncation, header mutation). The most
-recent 1000-case campaign produced zero panics and zero hangs, and malformed
-streams return errors rather than crashing. This is sampling, not proof — two
+Corrupt input is fuzz-tested two ways: by mutating real streams (bit-flips,
+truncation, header mutation), and by feeding uniformly random bytes straight to
+the decode entry point. Both currently produce zero panics and zero hangs, and
+malformed streams return errors rather than crashing.
+
+The two distributions find different bugs. A 1000-case corpus-mutation campaign
+was clean, but the first random-byte run found an unsigned underflow on a
+corrupt tile-size prefix (fixed in 0.1.3) — mutation rarely produces a size
+field wildly larger than the data around it, and random bytes do so constantly.
+If you fuzz this decoder, run both.
+
+This is sampling, not proof — two
 modules (`av2_qm`, `av2_palette`) are additionally panic-free *by construction*
 under `#![deny(clippy::indexing_slicing)]`; the rest are not yet.
 
