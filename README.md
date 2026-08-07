@@ -116,13 +116,18 @@ default via the `capi` feature.
 
 Those symbol names are inherited from the dav1d lineage, which means they
 **collide at link time with any other decoder from that lineage** — notably
-`rav1d`. If you link both, turn the C ABI off:
+`rav1d`. The assembly kernels export a handful of shared lookup tables under
+the same names, for the same reason. If you link both decoders into one
+binary, build with default features off:
 
 ```toml
 rusty_av2d = { version = "0.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 ```
 
-The safe Rust API is unaffected either way.
+That drops both the C ABI and the assembly paths, leaving no unmangled
+symbols. The safe Rust API is unaffected either way — this is exactly how
+[`remade_ffmpeg_rs`](https://github.com/Remade-With-Rust/remade_ffmpeg_rs)
+links AV1 and AV2 side by side.
 
 ## Limitations
 

@@ -4409,15 +4409,25 @@ fn parse_obus(
                     } else {
                         let mut sz = 0usize;
                         for k in 0..tinfo.n_bytes as usize {
-                            // HARDENING: a corrupt tile-count/size prefix can run past the OBU.
-                            if off + k >= raw.len() {
+                            // HARDENING: a corrupt tile-count/size prefix can run past the
+                            // OBU. `off + k` is checked with checked_add — a plain `off + k`
+                            // can itself wrap and silently pass the very bound it guards.
+                            if off.checked_add(k).is_none_or(|i| i >= raw.len()) {
                                 return Err(Rav1dError::InvalidArgument);
                             }
                             sz |= (raw[off + k] as usize) << (k * 8);
                         }
                         sz += 1;
-                        off += tinfo.n_bytes as usize;
-                        rem -= tinfo.n_bytes as usize;
+                        // HARDENING: `sz` is attacker-controlled (assembled from up to
+                        // n_bytes of stream data). Both subtractions below underflow — and
+                        // panic — when the declared tile size exceeds the tile data actually
+                        // left, so check against `rem` instead of assuming it fits.
+                        let nb = tinfo.n_bytes as usize;
+                        if rem < nb || rem - nb < sz {
+                            return Err(Rav1dError::InvalidArgument);
+                        }
+                        off += nb;
+                        rem -= nb;
                         v.push((off, sz));
                         off += sz;
                         rem -= sz;
