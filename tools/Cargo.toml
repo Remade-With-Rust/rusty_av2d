@@ -1,0 +1,42 @@
+[package]
+name = "rusty_av2d-cli"
+authors = ["Rav1d Developers", "Prossimo"]
+version = "1.1.0"
+edition = "2021"
+default-run = "dav1d"
+description = "CLI tools for the rusty_av2d pure-Rust AV2 decoder"
+license = "BSD-2-Clause"
+repository = "https://github.com/Remade-With-Rust/rusty_av2d"
+publish = false
+exclude = ["*.c", "*.h", "*.in", "meson*"]
+
+[[bin]]
+path = "dav1d.rs"
+name = "dav1d"
+
+[[bin]]
+path = "seek_stress.rs"
+name = "seek_stress"
+
+[dependencies]
+cfg-if = "1.0.0"
+libc = "0.2"
+rusty_av2d = { path = "../", version = "0.1.0", default-features = false }
+
+[build-dependencies]
+cc = "1.0.79"
+
+[features]
+default = ["asm", "asm_arm64_dotprod", "asm_arm64_i8mm", "bitdepth_8", "bitdepth_16"]
+asm = ["rusty_av2d/asm"]
+asm_arm64_dotprod = ["rusty_av2d/asm_arm64_dotprod"]
+asm_arm64_i8mm = ["rusty_av2d/asm_arm64_i8mm"]
+bitdepth_8 = ["rusty_av2d/bitdepth_8"]
+bitdepth_16 = ["rusty_av2d/bitdepth_16"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_System_Performance",
+    "Win32_System_SystemInformation",
+] }

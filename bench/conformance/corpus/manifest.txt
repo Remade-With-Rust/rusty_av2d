@@ -1,0 +1,30 @@
+golden_2f                  432x240    2f  the original byte-exact clip (baseline PASS)
+v432_2f_q128               432x240    2f  qp=128  
+v432_8f_q160               432x240    8f  qp=128  
+v320_4f_q90                320x176    4f  qp=90   
+v432_16f_q128              432x240   16f  qp=128  
+v432_4f_tiles2x2           432x240    4f  qp=110  --tile-columns=1 --tile-rows=1
+v432_16f_q128              432x240   16f  qp=128  
+v432_8f_hm_q80             432x240    8f  qp=80   
+v432_4f_10b                432x240    4f  qp=128  -b 10 --input-bit-depth=10
+v432_4f_422                432x240    4f  qp=128  --i422 --profile=2
+v432_4f_444                432x240    4f  qp=128  --i444 --profile=1
+v432_4f_tiles2x2           432x240    4f  qp=128  --tile-columns=1 --tile-rows=1
+v432_4f_tilecols2          432x240    4f  qp=128  --tile-columns=1 --tile-rows=0
+v432_4f_allintra           432x240    4f  qp=128  
+v432_4f_10b_422            432x240    4f  qp=128  -b 10 --input-bit-depth=10 --i422
+v432_4f_10b_444            432x240    4f  qp=128  -b 10 --input-bit-depth=10 --i444
+v432_16f_tip2              432x240   16f  qp=220  
+v432_8f_tipfm2             432x240    8f  qp=160  pure-translation source; 1 TIP-as-output (OBU_TIP) frame
+v432_8f_sb128cdef          432x240    8f  qp=80   --sb-size=128 --enable-restoration=0
+v432_4f_sb128t2            432x240    4f  qp=128  --sb-size=128 --tile-columns=1 --tile-rows=0 --enable-restoration=0
+v432_8f_sb128tipfm2        432x240    8f  qp=160  --sb-size=128 --enable-restoration=0
+v432_4f_sb128_10b          432x240    4f  qp=128  -b 10 --input-bit-depth=10 --sb-size=128 --enable-restoration=0
+v432_4f_sb128_422          432x240    4f  qp=128  --i422 --profile=2 --sb-size=128 --enable-restoration=0
+v432_4f_sb128_444          432x240    4f  qp=128  --i444 --profile=1 --sb-size=128 --enable-restoration=0
+v432_4f_scc                432x240    4f  qp=128  --tune-content=screen
+v432_4f_grain              432x240    4f  qp=128  --film-grain-test=1
+v432_8f_sframe             432x240    8f  qp=128  --enable-sframe=1 --sframe-dist=4 --sframe-mode=1
+v432_4f_grain32            432x240    4f  qp=128  --film-grain-test=9 --film-grain-block-size=1
+v640x360                   640x360    2f  qp=128  
+v424x240                   424x240    2f  qp=128  
