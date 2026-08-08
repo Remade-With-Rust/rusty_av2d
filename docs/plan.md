@@ -163,6 +163,15 @@ revertable.
    copies every block a second time. Confirm whether that buffer is still load-
    bearing now that recon is complete, and if so whether it can be written once
    rather than mirrored.
+5. **Hoist `work_tick` out of the innermost loops.** It is an opaque call with a
+   side effect and an early `break` on every pixel, which forbids vectorization
+   outright — 66 sites in `av2_inter`, 47 in `av2_ipred`, 20 in `av2_itx`. It
+   costs under 1% of runtime, so this is not a performance fix; it is the
+   precondition for Phase 2 existing at all. Move the budget check to per-row or
+   per-block, where it still bounds a corrupt stream.
+6. **Stop allocating inside kernels.** 33 `vec![]` sites across the DSP modules;
+   motion compensation heap-allocates its intermediate buffer on every one of
+   40,466 calls. Replace with thread-local scratch sized once per frame.
 
 **Gate for every step:** conformance corpus 45/45 byte-identical, plus the test
 suite. This work must not change a single output byte — that is exactly what makes
@@ -173,24 +182,72 @@ because the balance will have shifted.
 
 ### Phase 2 — SIMD and NEON
 
-Only now, and only where Phase 0's re-profile says it pays.
+The kernel-by-kernel map. Every entry names the function, the file, what shape it
+is, and what has to be true before it can be vectorized at all.
 
-- **Portable SIMD first.** Write kernels with `std::simd` where it is expressive
-  enough: one source, x86 and aarch64 both, no per-architecture duplication. It is
-  nightly-only today, so gate it behind a feature and keep the scalar path as the
-  stable default until it lands.
+#### Blockers that apply to every kernel
+
+Two things currently make *all* of these unvectorizable regardless of ISA. Both
+must be cleared first; neither is SIMD work.
+
+**`work_tick` sits in the innermost per-pixel loops.** It is an opaque call with a
+side effect and an early `break` on every iteration, which forbids vectorization
+outright. Counts: `av2_inter` 66, `av2_ipred` 47, `av2_itx` 20, `av2_deblock` 8,
+`av2_filter` 7, `av2_lr` 5. It costs under 1% of runtime, so this is not a
+performance fix — it is a *correctness-of-shape* fix. Hoist the budget check to
+per-row or per-block granularity, where it still bounds a corrupt stream but no
+longer sits between the compiler and the loop.
+
+**Per-call heap allocation inside kernels.** `av2_itx` 12 sites, `av2_ipred` 9,
+`av2_inter` 6, `av2_lr` 4. Motion compensation allocates its intermediate buffer
+on *every one of 40,466 calls*. Replace with reusable thread-local scratch sized
+once per frame.
+
+#### The map
+
+| # | Kernel | File | Shape | Vectorizes? | Blockers beyond the two above |
+|---|---|---|---|---|---|
+| 1 | `mc_translate` 2D path | `av2_inter.rs:78` | separable 8-tap H then V, `i32` mid buffer | **Ideal.** Textbook dot-product; 8 taps × 16 lanes | `get()` closure clamps per tap; heap `mid` per call |
+| 2 | `mc_translate` H-only / V-only | `av2_inter.rs` | single 8-tap pass | **Ideal**, same shape | same |
+| 3 | `comp_avg`, `comp_w_avg`, `comp_mask`, `comp_w_mask_ss`, `bacp_mask` | `av2_inter.rs:242–343` | elementwise blend of two buffers | **Trivial.** Pure elementwise, no gather | none — do these first, they are the cheapest wins |
+| 4 | `lr_filter_luma` (Wiener) | `av2_lr.rs:176` | separable 7-tap + NS/PC classes | **Ideal**, same family as MC | per-class branch should hoist out of the pixel loop |
+| 5 | `cdef_filter_block` | `av2_filter.rs:97` | per-pixel, 2 pri + 4 sec taps at direction-dependent offsets, running min/max | **Good.** Offsets are constant per call; min/max are `vmin`/`vmax` | branchy `pri_strength>0` / `sec_strength>0`; specialize into 3 variants |
+| 6 | `cdef_find_dir` | `av2_filter.rs:157` | 8×8 directional cost search | **Moderate.** Reduction-heavy | called once per 8×8, lower value than the filter |
+| 7 | `deblock` | `av2_deblock.rs:104` | 4 rows × short filter, strided both ways | **Moderate.** Vertical edges are contiguous; horizontal edges need a transpose | `filter_choice` is a data-dependent early-out per edge |
+| 8 | `dr_z1_idif` / `dr_z3_idif` / `dr_z2_idif` | `av2_ipred.rs:268–347` | directional intra, per-pixel interpolation from an edge array | **Moderate.** Gather-ish but the index step is affine per row | blocks are small; win is per-block-size specialization |
+| 9 | `ipred_dc*` / `ipred_ibp_dc` | `av2_ipred.rs:71–134` | sum-then-splat, then a weighted blend | **Easy** (horizontal reduction + broadcast) | small blocks; modest absolute win |
+| 10 | `inv_dct*_1d` / `inv_adst*_1d` / `inv_ddt*_1d` | `av2_itx.rs:148–245` | 1D butterflies over **strided** access `c[j*stride]` | **Hostile as written.** Strided loads kill it | needs the dav1d approach: operate on N rows at once and transpose between passes, not one strided vector |
+| 11 | `av2_grain` synthesis | `av2_grain.rs` | AR filter + per-pixel blend | **Good**, and already tick-free | only runs on film-grain streams |
+| 12 | `sad_nxn`, `prep_opfl` | `av2_inter.rs:493,415` | absolute-difference reduction | **Trivial** (`vabsd` + horizontal add) | small share of runtime |
+
+#### Ordering
+
+Do them in this order, re-deriving after Phase 1 rather than trusting today's
+split:
+
+1. **#3 compound blends** — elementwise, no edge cases, immediate win, and they
+   establish the scalar-twin test harness on the easiest possible case.
+2. **#1/#2 motion compensation** — the largest single kernel share (13.1%).
+3. **#4 Wiener** and **#5 CDEF** — the bulk of the 12.2% filter stage.
+4. **#7 deblock**, then **#8/#9 intra**.
+5. **#10 transforms last.** They are 0.4% of runtime *and* the hardest shape.
+   Porting dav1d's transform assembly first would be the single worst use of
+   effort available here.
+
+#### How, not just where
+
+- **Portable SIMD first.** `std::simd` where it is expressive enough: one source
+  covering x86 and aarch64, no per-architecture duplication. Nightly-only today,
+  so gate it behind a feature and keep scalar as the stable default.
 - **Intrinsics only where portable SIMD leaves measurable performance behind**, and
-  then per-family rather than wholesale: `core::arch::x86_64` (SSE4.1/AVX2) and
-  `core::arch::aarch64` (NEON), dispatched at runtime through the existing
-  `cpu.rs` feature detection.
-- **Order by the re-profiled numbers.** On today's split that means in-loop filters
-  (12.2%) and MC (13.1%) first, transforms and intra last — they are rounding
-  errors. Re-derive this after Phase 1 rather than assuming it holds.
-- **Every kernel keeps its scalar twin**, and a test asserts the two produce
-  identical output over randomized inputs. The scalar version is the reference and
-  must never be deleted. This is the same discipline the decoder was built with:
-  correctness is defined by byte-equality, and a fast wrong answer is a regression.
-- ARM kernels must be verified on real ARM hardware, not only by cross-compiling.
+  then per-kernel rather than wholesale: `core::arch::x86_64` (SSE4.1/AVX2) and
+  `core::arch::aarch64` (NEON), dispatched at runtime through the `cpu.rs` feature
+  detection that was deliberately kept when the assembly was deleted.
+- **Every kernel keeps its scalar twin**, with a test asserting the two agree
+  bit-exactly over randomized inputs. The scalar version is the reference and must
+  never be deleted. Correctness here is byte-equality; a fast wrong answer is a
+  regression.
+- ARM kernels must be verified on real ARM hardware, not only cross-compiled.
 
 **Exit:** each kernel is bit-exact against its twin, corpus is 45/45, and the
 benchmark shows a measured per-kernel delta.
