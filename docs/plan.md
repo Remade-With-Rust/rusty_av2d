@@ -169,9 +169,34 @@ revertable.
    costs under 1% of runtime, so this is not a performance fix; it is the
    precondition for Phase 2 existing at all. Move the budget check to per-row or
    per-block, where it still bounds a corrupt stream.
-6. **Stop allocating inside kernels.** 33 `vec![]` sites across the DSP modules;
-   motion compensation heap-allocates its intermediate buffer on every one of
-   40,466 calls. Replace with thread-local scratch sized once per frame.
+6. **Set a global allocator — measured 1.38x on its own, for one line.**
+   The decoder currently uses the system allocator, and it is allocation-bound
+   to a degree nothing else in this document predicted. Measured on the 30-frame
+   640x360 clip, median of 7 warmed runs, corpus 45/45 byte-identical throughout:
+
+   | Config | Median | Speedup |
+   |---|---:|---:|
+   | baseline (system heap, `vec![]` per call) | 4808 ms | 1.00x |
+   | + MC scratch buffer only | 4380 ms | 1.10x |
+   | + [`rusty_alloc`](https://crates.io/crates/rusty_alloc) only | **3473 ms** | **1.38x** |
+   | + both | 3405 ms | 1.41x |
+
+   This is the single cheapest win available and it should be step one of Phase 1
+   — a bigger measured speedup than the entire kernel-SIMD phase can deliver
+   (Amdahl ceiling ~1.35x), for one `#[global_allocator]` line.
+
+   Note it belongs in the **binary**, not the library: a library that imposes a
+   global allocator on its dependents is bad manners. Set it in the CLI, and
+   document it as a recommendation for embedders.
+
+7. **Then stop allocating inside kernels.** With a fast allocator in place the
+   marginal win shrinks (3473 -> 3405, ~2%), so this is now a cleanup rather than
+   the headline — but it is still worth doing, and `vec![0; n]` additionally pays
+   for a memset that the next loop immediately overwrites. ~190 allocation sites
+   across the decode path, many per-block: `pred`, `coeff`, `residual`, and `cf`
+   are allocated per transform unit. Replace the hot ones with thread-local
+   scratch (an RAII guard that returns the buffer on drop keeps the call sites
+   unchanged).
 
 **Gate for every step:** conformance corpus 45/45 byte-identical, plus the test
 suite. This work must not change a single output byte — that is exactly what makes
@@ -293,7 +318,10 @@ Original scope, for reference:
   matched thread counts, CPU time, interleaved runs.
 - **Phase 1 dominates.** If effort has to be cut, cut Phase 2 — not Phase 1. The
   measurements say the data layout is worth more than the vectorization, and it is
-  the only part that is a prerequisite for anything else.
+  the only part that is a prerequisite for anything else. The allocator result
+  sharpens this: **1.38x from one line**, versus an Amdahl ceiling of ~1.35x for
+  perfect SIMD on every kernel. Allocation and data layout are where this decoder
+  actually is.
 
 ## 5. Open questions
 
