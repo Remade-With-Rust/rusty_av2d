@@ -21,7 +21,7 @@ name = "seek_stress"
 [dependencies]
 # The decoder is allocation-heavy (~190 sites, many per transform unit); on the
 # system heap that dominates. Measured 1.38x on a 30-frame 640x360 clip.
-rusty_alloc-api = "0.3.2"
+rusty_alloc-api = "0.4"
 cfg-if = "1.0.0"
 libc = "0.2"
 rusty_av2d = { path = "../", version = "0.2.1", default-features = false, features = ["capi"] }
