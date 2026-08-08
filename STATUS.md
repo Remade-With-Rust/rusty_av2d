@@ -63,6 +63,27 @@ This is sampling, not proof — two
 modules (`av2_qm`, `av2_palette`) are additionally panic-free *by construction*
 under `#![deny(clippy::indexing_slicing)]`; the rest are not yet.
 
+## Benchmarking
+
+`bench/bench.sh` times the corpus and reports a median plus a min–max spread per
+clip — never a single number, since the run-to-run spread on a warm machine is
+about 2% and a change smaller than that is not a result.
+
+```sh
+cargo build --release
+SAVE=bench/baselines/mine.txt bash bench/bench.sh          # record
+BASELINE=bench/baselines/mine.txt bash bench/bench.sh      # compare
+```
+
+The binary ships with `rusty_alloc` as its global allocator, and that is the
+baseline configuration — measuring against the system heap would flatter every
+later change by the 1.38× the allocator already provides.
+
+**Known issue:** under Git Bash/MSYS on Windows a full-corpus sweep can wedge
+partway through, leaving unkillable decoder processes. Individual clips and
+small batches are reliable; run in batches and merge, or use WSL/Linux. No
+committed baseline yet for this reason — see `bench/bench.sh`.
+
 ## Debugging
 
 All tracing is behind `RUSTY_AV2D_DEBUG=1` (`RAV2D_DEBUG` is a legacy alias). Capture-oracle comparisons additionally

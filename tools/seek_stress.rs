@@ -475,6 +475,12 @@ unsafe fn main_0(argc: c_int, argv: *const *mut c_char) -> c_int {
     return libc::EXIT_SUCCESS;
 }
 
+/// Primary allocator, per the Remade With Rust convention: `RustyAlloc` in every
+/// `[[bin]]` root, never in a library (that would hijack a downstream consumer's
+/// allocator choice). See `tools/dav1d.rs` for the measured justification.
+#[global_allocator]
+static ALLOC: rusty_alloc_api::RustyAlloc = rusty_alloc_api::RustyAlloc;
+
 pub fn main() {
     let mut args: Vec<*mut c_char> = Vec::new();
     for arg in ::std::env::args() {

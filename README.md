@@ -63,6 +63,24 @@ rusty_av2d = "0.1"
 Requires Rust 1.79+. No `nasm`, no C toolchain, no build-time codegen — the
 crate is pure Rust and builds with cargo alone.
 
+### Pick an allocator
+
+The decoder allocates heavily — roughly 190 sites across the decode path, many
+of them per transform unit. On a system heap that cost **dominates the profile**.
+Swapping in [`rusty_alloc`](https://crates.io/crates/rusty_alloc) (a pure-Rust
+mimalloc remake) measured **1.38× end-to-end**, byte-identical output, for one
+line:
+
+```rust
+#[global_allocator]
+static ALLOC: rusty_alloc_api::RustyAlloc = rusty_alloc_api::RustyAlloc;
+```
+
+The bundled CLI does this. The **library deliberately does not** — installing a
+global allocator from a library hijacks every dependent's choice. If you embed
+this crate, set one in your binary; it is the single largest speedup available
+here, larger than fully vectorizing every kernel could deliver.
+
 ## Usage
 
 The decoder exposes a safe Rust API that mirrors

@@ -127,17 +127,24 @@ Revised order: **remove asm → fix the data layout → then SIMD.**
 
 ## 3. The plan
 
-### Phase 0 — Measurement harness
+### Phase 0 — Measurement harness — **partly done**
 
-Nothing here is worth doing blind, and the numbers above came from throwaway
-instrumentation that no longer exists.
+Nothing here is worth doing blind, and the stage numbers above came from
+throwaway instrumentation that no longer exists.
 
-- Land a `profiling` cargo feature (default **off**, zero cost when disabled) with
-  stage timers around: SB loop, each in-loop filter, MC, transforms, intra, coef
-  decode, recon write-back.
-- Add a repeatable benchmark: fixed clip set, fixed frame counts, CPU time,
-  ABBA-alternated, reporting a median and a spread — not a single number.
-- Record a baseline and commit it. Every later phase quotes a delta against it.
+- **DONE — repeatable benchmark.** `bench/bench.sh` times the corpus and reports
+  a median plus min–max spread per clip, with `SAVE=`/`BASELINE=` for recording
+  and comparing. Warm-run spread is ~2%, so that is the floor below which a
+  change is not a result.
+- **TODO — a committed baseline.** Not recorded yet: under Git Bash/MSYS a full
+  sweep wedges partway through, leaving unkillable decoder processes, and every
+  later spawn stalls. De-forking the timing path (`EPOCHREALTIME` instead of two
+  `date` spawns per decode) helped but did not fix it. Individual clips and small
+  batches are reliable. Record the baseline under WSL/Linux, or in batches.
+- **TODO — stage profiler.** A `profiling` cargo feature (default **off**, zero
+  cost when disabled) with timers around: SB loop, each in-loop filter, MC,
+  transforms, intra, coef decode, recon write-back. Needed to re-derive the
+  Phase 2 ordering after Phase 1 shifts the balance.
 
 **Exit:** one command prints the stage table, and re-running it twice agrees
 inside noise.
@@ -169,7 +176,7 @@ revertable.
    costs under 1% of runtime, so this is not a performance fix; it is the
    precondition for Phase 2 existing at all. Move the budget check to per-row or
    per-block, where it still bounds a corrupt stream.
-6. **Set a global allocator — measured 1.38x on its own, for one line.**
+6. **Set a global allocator — DONE, measured 1.38x on its own, for one line.**
    The decoder currently uses the system allocator, and it is allocation-bound
    to a degree nothing else in this document predicted. Measured on the 30-frame
    640x360 clip, median of 7 warmed runs, corpus 45/45 byte-identical throughout:
@@ -181,13 +188,18 @@ revertable.
    | + [`rusty_alloc`](https://crates.io/crates/rusty_alloc) only | **3473 ms** | **1.38x** |
    | + both | 3405 ms | 1.41x |
 
-   This is the single cheapest win available and it should be step one of Phase 1
-   — a bigger measured speedup than the entire kernel-SIMD phase can deliver
-   (Amdahl ceiling ~1.35x), for one `#[global_allocator]` line.
+   This was the single cheapest win available — a bigger measured speedup than
+   the entire kernel-SIMD phase can deliver (Amdahl ceiling ~1.35x), for one
+   `#[global_allocator]` line. **Shipped in 0.2.1**: `rusty_alloc` is installed in
+   both `[[bin]]` roots, per the Remade With Rust convention that the allocator
+   belongs in binaries and bench roots and never in a library (a library that
+   installs one hijacks every dependent's choice). The README documents it as a
+   recommendation for embedders.
 
-   Note it belongs in the **binary**, not the library: a library that imposes a
-   global allocator on its dependents is bad manners. Set it in the CLI, and
-   document it as a recommendation for embedders.
+   It is also now the **benchmark baseline** (`bench/bench.sh`,
+   `bench/baselines/`). Later phases quote deltas against the shipped
+   configuration; measuring against the system heap would flatter every
+   subsequent change by the 1.38x already banked.
 
 7. **Then stop allocating inside kernels.** With a fast allocator in place the
    marginal win shrinks (3473 -> 3405, ~2%), so this is now a cleanup rather than
