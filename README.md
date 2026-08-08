@@ -60,8 +60,18 @@ honored in *both* directions.
 rusty_av2d = "0.1"
 ```
 
-Requires Rust 1.79+. On x86 targets you'll want [`nasm`](https://nasm.us/)
-installed for the assembly paths; build with `--no-default-features` to skip it.
+Requires Rust 1.79+.
+
+On x86, the default features build the assembly inherited from `rav1d`, which
+needs [`nasm`](https://nasm.us/). **That assembly is currently dead code** — the
+AV2 decode path is entirely pure Rust and never dispatches to it (measured: the
+`asm` and no-`asm` builds are indistinguishable and byte-identical). It is
+scheduled for removal; see [`docs/plan.md`](docs/plan.md). Until then you can
+skip `nasm` entirely with no loss:
+
+```toml
+rusty_av2d = { version = "0.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+```
 
 ## Usage
 
@@ -136,10 +146,12 @@ These are real, and you should read them before building on this.
 1. **AV2 is not a finalized standard.** There are no official conformance
    vectors. "Correct" here means bit-exact against AVM as of this commit — the
    bitstream itself may still change under us.
-2. **Performance is unoptimized and unmeasured.** Correctness was the only
-   goal. The decode path also carries ~425 bounds/liveness guard calls used for
-   corrupt-input hardening, which are pure overhead in a trusted-input setting.
-   Do not benchmark this against `libavm` and expect a fair fight.
+2. **Performance is unoptimized.** Correctness was the only goal. The decoder
+   is **fully scalar** — no SIMD, and no live assembly (see below). Samples are
+   stored one-per-`i32` with a bounds check on every read, which costs motion
+   compensation roughly 20× what the arithmetic alone would. Do not benchmark
+   this against `libavm` and expect a fair fight.
+   [`docs/plan.md`](docs/plan.md) has the profile and the plan to fix it.
 3. **Research-grade internals.** The AV2 path uses thread-local state rather
    than the upstream pipeline structure, and retains in-tree diagnostic probes
    (silent unless `RUSTY_AV2D_DEBUG=1`).

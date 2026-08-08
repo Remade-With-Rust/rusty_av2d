@@ -1,0 +1,237 @@
+# Plan: SIMD/NEON, and removing the assembly
+
+**Status:** proposed, not started. Written 2026-08-07 against `rusty_av2d` 0.1.3.
+
+The goal is a decoder that is fast because of portable Rust SIMD, and that carries
+no hand-written assembly at all. This document says what we measured, why the
+obvious ordering is wrong, and what to do in what order.
+
+---
+
+## 1. Where we actually are
+
+### The assembly is dead code
+
+All 47 `.asm` files (5.6 MB of source, ~1.1 MB linked) still compile under the
+`asm` feature, but **nothing in the AV2 decode path reaches them.** The assembly
+is dispatched through dav1d's DSP function-pointer tables, and *zero* `av2_*`
+modules reference `Rav1dDSPContext`. Every DSP family got a fresh pure-Rust AV2
+implementation during bring-up:
+
+| dav1d/AV1 asm family | AV2 replacement |
+|---|---|
+| `mc` | `av2_inter.rs` |
+| `itx` | `av2_itx.rs` |
+| `ipred` | `av2_ipred.rs` |
+| `loopfilter` | `av2_deblock.rs` |
+| `cdef` | `av2_filter.rs` (CDEF + CCSO) |
+| `looprestoration` | `av2_lr.rs` |
+| `filmgrain` | `av2_grain.rs` |
+
+That is the complete set, so there is nothing left for the assembly to serve.
+
+Verified empirically, not just by reading: built with and without `asm`,
+ABBA-alternated three timing pairs on the largest corpus clip. The `asm` build ran
+762–1102 ms, the no-`asm` build 756–854 ms — pure noise, no separation — and the
+outputs are byte-identical. A live vector path would not be invisible.
+
+### There is no SIMD either
+
+Zero uses of `std::arch`, `core::arch`, `_mm*`, NEON intrinsics, `target_feature`,
+or portable SIMD anywhere in the AV2 modules. The only file in the crate touching
+`core::arch` is `cpu.rs`, and that is CPU feature *detection* for selecting asm
+variants, not computation. The decoder is fully scalar; the only vectorization is
+whatever LLVM auto-vectorizes out of scalar loops, which on this branchy,
+table-driven code is very little.
+
+### The profile — and the surprise
+
+Measured on 640×360, 30 frames (1 key + 29 inter), release build, stage timers
+around each stage. `samply` needs Administrator on Windows and was unavailable, so
+this is coarse instrumentation rather than a sampling profile — treat the split as
+first-order, not exact.
+
+| Stage | ms | % of total |
+|---|---:|---:|
+| SB decode loop | 6451 | 87.8% |
+| In-loop filters (deblock, CDEF, LR, CCSO, GDF) | 896 | 12.2% |
+| — inter MC | 960 | 13.1% |
+| — inverse transforms | 29 | 0.4% |
+| — intra prediction | 7 | 0.1% |
+| — inter block parse (incl. `refmvs_find`) | 42 | 0.6% |
+| — **residual** (recon write-back, dequant, blending, padded-buffer mirroring) | **5413** | **73.7%** |
+
+Three things fall out of this, and they reshape the whole plan:
+
+**The classic SIMD targets are a minority of runtime.** MC + transforms + intra +
+filters together are ~26%. Even *infinitely fast* kernels cap the whole-decoder
+speedup at about **1.35×** by Amdahl. Porting dav1d's assembly one-for-one, or
+writing intrinsics for those kernels first, buys far less than it looks like.
+
+**Entropy decode is not the bottleneck.** The entire inter block parse, including
+the DRL stack construction, is 0.6%. This is the opposite of `rav1d`, where
+coefficient decode is ~53% serial MSAC and the decoder is at its floor. We are
+nowhere near that floor — which is good news, because the remaining cost is the
+kind that responds to work.
+
+**The `work_tick` hardening guards are not a meaningful cost.** 4.66 M calls over
+the run, well under 1% of runtime. `STATUS.md` currently implies otherwise; that
+claim should be corrected.
+
+### Why the kernels are slow — the root cause
+
+Inter MC costs **~139 ns per output pixel (~500 cycles)**. An 8-tap separable 2D
+filter is roughly 16 multiply-accumulates per pixel; this is about **20× off** what
+that should cost. The reason is structural, not algorithmic:
+
+```rust
+pub struct Plane { pub px: Vec<i32>, .. }               // i32 per sample
+
+pub fn at(&self, x: usize, y: usize) -> i32 {
+    self.px.get(y * self.stride + x).copied().unwrap_or(0)   // bounds check per sample
+}
+
+let get = |x, y| rf.at(x.clamp(0, rw - 1) as usize,          // two clamps per tap
+                       y.clamp(0, rh - 1) as usize);
+```
+
+Every sample read in the innermost tap loop pays a bounds check, two clamps, and a
+4-byte load for what is 8-bit data. That is 4× the memory traffic it needs, and it
+puts **4 samples in a 128-bit vector where 16 belong.**
+
+This is the crux: **you cannot vectorize this code as written.** A per-sample
+`Vec::get` with per-coordinate clamping has no vector form. The structural work is
+not a nice-to-have before SIMD — it is the thing that makes SIMD expressible at
+all, and on these numbers it is also where most of the win lives.
+
+---
+
+## 2. Why the stated order is wrong
+
+The natural instinct is "add SIMD/NEON, then delete the assembly." Two corrections
+from the measurements:
+
+**Removing the assembly does not need to wait.** It is provably dead. Nothing
+depends on it, deleting it cannot regress output, and it costs us a `nasm` build
+dependency, ~1.1 MB of binary, 5.6 MB of source, and a documented-but-false claim
+in the README. Do it first, in isolation, so the diff is unambiguous.
+
+**SIMD should not come first either.** Writing intrinsics against `Vec<i32>`
+planes with clamped per-sample gets would mean writing the SIMD *twice* — once
+against today's data layout, and again after the layout is fixed. Do the
+structural work first; it is worth more on its own, and it is the precondition.
+
+Revised order: **remove asm → fix the data layout → then SIMD.**
+
+---
+
+## 3. The plan
+
+### Phase 0 — Measurement harness
+
+Nothing here is worth doing blind, and the numbers above came from throwaway
+instrumentation that no longer exists.
+
+- Land a `profiling` cargo feature (default **off**, zero cost when disabled) with
+  stage timers around: SB loop, each in-loop filter, MC, transforms, intra, coef
+  decode, recon write-back.
+- Add a repeatable benchmark: fixed clip set, fixed frame counts, CPU time,
+  ABBA-alternated, reporting a median and a spread — not a single number.
+- Record a baseline and commit it. Every later phase quotes a delta against it.
+
+**Exit:** one command prints the stage table, and re-running it twice agrees
+inside noise.
+
+### Phase 1 — Data layout (the actual bottleneck)
+
+This is where the 73.7% lives. Each item is separately measurable and separately
+revertable.
+
+1. **Narrow the sample type.** `Vec<i32>` → `u8` for 8-bit and `u16` for high
+   bit depth, behind the existing `bitdepth_8` / `bitdepth_16` split (dav1d's
+   `BitDepth` generic pattern is already vendored here and can be reused).
+   Expect a large win from memory traffic alone, before any vectorization.
+2. **Get bounds checks out of the inner loops.** Replace per-sample `at()` in hot
+   kernels with slice-per-row access acquired once, so the check is amortized per
+   row rather than paid per sample.
+3. **Split edge handling from the interior.** Today every tap clamps. Instead,
+   detect the common case where a block plus its filter margin is entirely inside
+   the frame and run an unclamped fast path; keep the clamped path only for blocks
+   that genuinely touch the boundary. This is what makes the inner loop
+   vectorizable.
+4. **Audit the recon write-back and the padded-buffer mirror.** `write_recon_pad`
+   copies every block a second time. Confirm whether that buffer is still load-
+   bearing now that recon is complete, and if so whether it can be written once
+   rather than mirrored.
+
+**Gate for every step:** conformance corpus 45/45 byte-identical, plus the test
+suite. This work must not change a single output byte — that is exactly what makes
+it safe to do aggressively.
+
+**Exit:** re-profile. Phase 2 is planned against the *new* split, not this one,
+because the balance will have shifted.
+
+### Phase 2 — SIMD and NEON
+
+Only now, and only where Phase 0's re-profile says it pays.
+
+- **Portable SIMD first.** Write kernels with `std::simd` where it is expressive
+  enough: one source, x86 and aarch64 both, no per-architecture duplication. It is
+  nightly-only today, so gate it behind a feature and keep the scalar path as the
+  stable default until it lands.
+- **Intrinsics only where portable SIMD leaves measurable performance behind**, and
+  then per-family rather than wholesale: `core::arch::x86_64` (SSE4.1/AVX2) and
+  `core::arch::aarch64` (NEON), dispatched at runtime through the existing
+  `cpu.rs` feature detection.
+- **Order by the re-profiled numbers.** On today's split that means in-loop filters
+  (12.2%) and MC (13.1%) first, transforms and intra last — they are rounding
+  errors. Re-derive this after Phase 1 rather than assuming it holds.
+- **Every kernel keeps its scalar twin**, and a test asserts the two produce
+  identical output over randomized inputs. The scalar version is the reference and
+  must never be deleted. This is the same discipline the decoder was built with:
+  correctness is defined by byte-equality, and a fast wrong answer is a regression.
+- ARM kernels must be verified on real ARM hardware, not only by cross-compiling.
+
+**Exit:** each kernel is bit-exact against its twin, corpus is 45/45, and the
+benchmark shows a measured per-kernel delta.
+
+### Phase 3 — Delete the assembly
+
+Can be done at any point, and should be done **first** since it is free. Listed
+last only because it closes the arc.
+
+- Delete `src/x86/`, `src/arm/`, the `.asm`/`.S` sources, and the `nasm-rs` build
+  path from `build.rs`.
+- Remove the `asm`, `asm_arm64_dotprod`, `asm_arm64_i8mm`, `asm_arm64_sve2`
+  features. Keep `cpu.rs` feature detection — SIMD dispatch still needs it.
+- Reduce `cpu.rs` to what SIMD dispatch actually consumes.
+- Drop the `nasm` requirement from README and CI.
+- Correct the README's claim that `nasm` enables "the assembly paths", and
+  `STATUS.md`'s implication that the hardening guards are a significant cost.
+
+**Exit:** corpus 45/45, no `nasm` anywhere in the build, binary ~1.1 MB smaller.
+
+---
+
+## 4. What we are *not* claiming
+
+- **No speedup target.** We have a baseline and an Amdahl ceiling for the kernel
+  work (~1.35× if kernels went to zero); we do not yet have an estimate for Phase 1,
+  which is the larger and less predictable piece. Targets get set after Phase 0.
+- **No comparison to `libavm`** until the benchmark is honest: matched clips,
+  matched thread counts, CPU time, interleaved runs.
+- **Phase 1 dominates.** If effort has to be cut, cut Phase 2 — not Phase 1. The
+  measurements say the data layout is worth more than the vectorization, and it is
+  the only part that is a prerequisite for anything else.
+
+## 5. Open questions
+
+- Does the padded recon-mirror buffer still need to exist post-bring-up, or is it
+  scaffolding? Worth answering early — it may be free performance.
+- AV2's subpel filter taps are **identical to AV1's** (verified by diffing the
+  tables). So dav1d's `mc` kernels are algorithmically reusable even though we are
+  discarding their assembly — useful as a reference for what the vectorized form
+  should look like.
+- Threading is under-tested and un-profiled (`STATUS.md` limitation 4). Frame- or
+  tile-parallel decode may be worth more than any single-core work here, and should
+  be scoped before Phase 2 rather than after.

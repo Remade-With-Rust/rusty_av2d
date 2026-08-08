@@ -24,9 +24,13 @@ that are not superblock-aligned on either axis.
 1. **AV2 is not a finalized standard.** There are no official conformance
    vectors. "Correct" here means bit-exact against AVM/dav2d as of this commit;
    the bitstream may still change.
-2. **Performance is unoptimized and unmeasured.** Correctness was the only goal.
-   The decode path also carries ~425 bounds/liveness guard calls (`work_tick`)
-   used for corrupt-input hardening.
+2. **Performance is unoptimized.** Correctness was the only goal. The decoder
+   is fully scalar: no SIMD, and the assembly inherited from `rav1d` is dead code
+   that the AV2 path never dispatches to. Profiled, the classic vectorizable
+   kernels are only ~26% of runtime; most of the cost is the recon data path,
+   where samples are stored one-per-`i32` and bounds-checked per access. The
+   `work_tick` hardening guards were suspected to matter and measured not to
+   (4.7M calls, <1%). See `docs/plan.md`.
 3. **Research-grade internals.** The AV2 path uses thread-local state rather
    than the upstream pipeline structure, and retains in-tree diagnostic probes
    (all silent unless `RUSTY_AV2D_DEBUG=1`).
