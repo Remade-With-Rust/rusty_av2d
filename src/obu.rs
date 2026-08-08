@@ -271,11 +271,31 @@ fn parse_av2_frame_hdr_front(
         return Err(Rav1dError::InvalidArgument);
     }
     // frame_type: 0=KEY, 1=INTER, 2=INTRA, 3=SWITCH
-    let frame_type;
-    if seq_hdr.reduced_still_picture_header != 0 {
-        frame_type = 0;
+    //
+    // A single-picture-header stream (AV2 `single_picture_header_flag`, carried here under
+    // dav1d's inherited `reduced_still_picture_header` name) omits the frame_type symbol and
+    // is a KEY frame by definition. It does NOT skip the rest of the header: base_q_idx, the
+    // filter params and the tile info are all still coded. The body below is already
+    // reduced-aware (see the `reduced_still_picture_header == 0` guards through it), so the
+    // reduced case must FALL THROUGH into it rather than be branched around — branching
+    // around it returned (yac=0, frame_type=0) and decoded every still picture to flat grey,
+    // silently.
+    // KNOWN LIMITATION: a single-picture-header stream parses through the header now (the
+    // outer branch used to skip it entirely, silently decoding every still picture to flat
+    // grey), but the parse is not yet bit-exact -- the tile-info/seq-header interaction still
+    // diverges, and avm gates ~22 fields on this flag of which we mirror only some. Refuse the
+    // stream rather than emit wrong pixels silently; that silence was the actual defect.
+    // RUSTY_AV2D_ALLOW_SINGLE_PICTURE_HEADER=1 opts in for development on the remaining work.
+    if seq_hdr.reduced_still_picture_header != 0
+        && std::env::var("RUSTY_AV2D_ALLOW_SINGLE_PICTURE_HEADER").is_err()
+    {
+        crate::dlog!("[rav2d AV2 framehdr] single-picture-header stream: parse incomplete, refusing");
+        return Err(Rav1dError::UnsupportedBitstream);
+    }
+    let frame_type = if seq_hdr.reduced_still_picture_header != 0 {
+        0
     } else {
-        frame_type = match obu_type {
+        match obu_type {
             ClosedLoopKf | OpenLoopKf => 0,
             Switch => 3,
             LeadingTip | Tip | Bridge => 1,
@@ -286,7 +306,9 @@ fn parse_av2_frame_hdr_front(
                     1 // INTER
                 }
             }
-        };
+        }
+    };
+    {
         // S-frames (SWITCH/RAS): restricted_prediction_switch (avm decodeframe.c:8275; dav2d
         // LACKS this bit — its s-frame segfault). When set, every current ref slot becomes
         // RESTRICTED: pending implicit outputs flush, and the slot is excluded from all later

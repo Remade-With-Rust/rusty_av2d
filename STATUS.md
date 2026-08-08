@@ -6,7 +6,7 @@
 
 ## What is verified
 
-Every clip in a **45-clip conformance corpus** decodes **byte-identical** to the
+Every clip in a **46-clip conformance corpus** decodes **byte-identical** to the
 reference decoders (AOM's `avmdec`, and `dav2d` where it supports the stream).
 The suite also runs 111 unit/integration tests. Both gate every change.
 
@@ -21,20 +21,31 @@ that are not superblock-aligned on either axis.
 
 ## Known limitations — read before using
 
-1. **AV2 is not a finalized standard.** There are no official conformance
+1. **Single-picture-header streams are REFUSED.** An AV2 still picture encoded
+   without `--full-still-picture-hdr` sets `single_picture_header_flag`, and our
+   parse of that form is not yet bit-exact, so the decoder returns
+   `UnsupportedBitstream` rather than emit wrong pixels
+   (`RUSTY_AV2D_ALLOW_SINGLE_PICTURE_HEADER=1` opts in for development). The
+   **full**-header still picture decodes byte-identically and is in the corpus.
+   Repro and detail: `bench/conformance/corpus/pending/`.
+
+   This previously decoded to a flat grey frame **and reported success** — the
+   frame-header parse was branched around entirely for this flag. That silent
+   path is gone; what remains is an incomplete parse that now fails loudly.
+2. **AV2 is not a finalized standard.** There are no official conformance
    vectors. "Correct" here means bit-exact against AVM/dav2d as of this commit;
    the bitstream may still change.
-2. **Performance is unoptimized.** Correctness was the only goal. The decoder
+3. **Performance is unoptimized.** Correctness was the only goal. The decoder
    is fully scalar: no SIMD and no assembly (the inherited `rav1d` assembly was
    dead code for AV2 and has been removed). Profiled, the classic vectorizable
    kernels are only ~26% of runtime; most of the cost is the recon data path,
    where samples are stored one-per-`i32` and bounds-checked per access. The
    `work_tick` hardening guards were suspected to matter and measured not to
    (4.7M calls, <1%). See `docs/plan.md`.
-3. **Research-grade internals.** The AV2 path uses thread-local state rather
+4. **Research-grade internals.** The AV2 path uses thread-local state rather
    than the upstream pipeline structure, and retains in-tree diagnostic probes
    (all silent unless `RUSTY_AV2D_DEBUG=1`).
-4. **Threading is under-tested.** Correctness is gated single-threaded;
+5. **Threading is under-tested.** Correctness is gated single-threaded;
    multi-threaded output has only been spot-checked.
 
 ### Previously-known, now resolved
