@@ -1750,78 +1750,13 @@ impl Rav1dRefmvsDSPContext {
         }
     }
 
-    #[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-    #[inline(always)]
-    const fn init_x86(mut self, flags: CpuFlags) -> Self {
-        if !flags.contains(CpuFlags::SSE2) {
-            return self;
-        }
 
-        self.splat_mv = splat_mv::decl_fn!(fn dav1d_splat_mv_sse2);
 
-        if !flags.contains(CpuFlags::SSSE3) {
-            return self;
-        }
 
-        self.save_tmvs = save_tmvs::decl_fn!(fn dav1d_save_tmvs_ssse3);
-
-        if !flags.contains(CpuFlags::SSE41) {
-            return self;
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        {
-            self.load_tmvs = load_tmvs::decl_fn!(fn dav1d_load_tmvs_sse4);
-
-            if !flags.contains(CpuFlags::AVX2) {
-                return self;
-            }
-
-            self.save_tmvs = save_tmvs::decl_fn!(fn dav1d_save_tmvs_avx2);
-            self.splat_mv = splat_mv::decl_fn!(fn dav1d_splat_mv_avx2);
-
-            if !flags.contains(CpuFlags::AVX512ICL) {
-                return self;
-            }
-
-            self.save_tmvs = save_tmvs::decl_fn!(fn dav1d_save_tmvs_avx512icl);
-            self.splat_mv = splat_mv::decl_fn!(fn dav1d_splat_mv_avx512icl);
-        }
-
-        self
-    }
-
-    #[cfg(all(feature = "asm", any(target_arch = "arm", target_arch = "aarch64")))]
-    #[inline(always)]
-    const fn init_arm(mut self, flags: CpuFlags) -> Self {
-        if !flags.contains(CpuFlags::NEON) {
-            return self;
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            self.load_tmvs = load_tmvs::decl_fn!(fn dav1d_load_tmvs_neon);
-        }
-
-        self.save_tmvs = save_tmvs::decl_fn!(fn dav1d_save_tmvs_neon);
-        self.splat_mv = splat_mv::decl_fn!(fn dav1d_splat_mv_neon);
-
-        self
-    }
 
     #[inline(always)]
     const fn init(self, flags: CpuFlags) -> Self {
-        #[cfg(feature = "asm")]
-        {
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                return self.init_x86(flags);
-            }
-            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-            {
-                return self.init_arm(flags);
-            }
-        }
+
 
         #[allow(unreachable_code)] // Reachable on some #[cfg]s.
         {

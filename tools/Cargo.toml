@@ -27,10 +27,7 @@ rusty_av2d = { path = "../", version = "0.1.3", default-features = false, featur
 cc = "1.0.79"
 
 [features]
-default = ["asm", "asm_arm64_dotprod", "asm_arm64_i8mm", "bitdepth_8", "bitdepth_16"]
-asm = ["rusty_av2d/asm"]
-asm_arm64_dotprod = ["rusty_av2d/asm_arm64_dotprod"]
-asm_arm64_i8mm = ["rusty_av2d/asm_arm64_i8mm"]
+default = ["bitdepth_8", "bitdepth_16"]
 bitdepth_8 = ["rusty_av2d/bitdepth_8"]
 bitdepth_16 = ["rusty_av2d/bitdepth_16"]
 

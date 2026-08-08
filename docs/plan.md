@@ -1,6 +1,7 @@
 # Plan: SIMD/NEON, and removing the assembly
 
-**Status:** proposed, not started. Written 2026-08-07 against `rusty_av2d` 0.1.3.
+**Status:** Phase 3 (assembly removal) is **done**. Phases 0–2 are proposed.
+Written 2026-08-07 against `rusty_av2d` 0.1.3.
 
 The goal is a decoder that is fast because of portable Rust SIMD, and that carries
 no hand-written assembly at all. This document says what we measured, why the
@@ -10,10 +11,10 @@ obvious ordering is wrong, and what to do in what order.
 
 ## 1. Where we actually are
 
-### The assembly is dead code
+### The assembly was dead code (now removed — see Phase 3)
 
-All 47 `.asm` files (5.6 MB of source, ~1.1 MB linked) still compile under the
-`asm` feature, but **nothing in the AV2 decode path reaches them.** The assembly
+All 47 x86 `.asm` files plus the ARM `.S` sources (8.6 MB total, ~1.1 MB linked)
+compiled under the `asm` feature, but **nothing in the AV2 decode path reached them.** The assembly
 is dispatched through dav1d's DSP function-pointer tables, and *zero* `av2_*`
 modules reference `Rav1dDSPContext`. Every DSP family got a fresh pure-Rust AV2
 implementation during bring-up:
@@ -39,8 +40,8 @@ outputs are byte-identical. A live vector path would not be invisible.
 
 Zero uses of `std::arch`, `core::arch`, `_mm*`, NEON intrinsics, `target_feature`,
 or portable SIMD anywhere in the AV2 modules. The only file in the crate touching
-`core::arch` is `cpu.rs`, and that is CPU feature *detection* for selecting asm
-variants, not computation. The decoder is fully scalar; the only vectorization is
+`core::arch` is `cpu.rs`, and that is CPU feature *detection* — retained because
+runtime SIMD dispatch will need it. The decoder is fully scalar; the only vectorization is
 whatever LLVM auto-vectorizes out of scalar loops, which on this branchy,
 table-driven code is very little.
 
@@ -75,8 +76,7 @@ nowhere near that floor — which is good news, because the remaining cost is th
 kind that responds to work.
 
 **The `work_tick` hardening guards are not a meaningful cost.** 4.66 M calls over
-the run, well under 1% of runtime. `STATUS.md` currently implies otherwise; that
-claim should be corrected.
+the run, well under 1% of runtime. `STATUS.md` implied otherwise; corrected.
 
 ### Why the kernels are slow — the root cause
 
@@ -112,9 +112,9 @@ The natural instinct is "add SIMD/NEON, then delete the assembly." Two correctio
 from the measurements:
 
 **Removing the assembly does not need to wait.** It is provably dead. Nothing
-depends on it, deleting it cannot regress output, and it costs us a `nasm` build
-dependency, ~1.1 MB of binary, 5.6 MB of source, and a documented-but-false claim
-in the README. Do it first, in isolation, so the diff is unambiguous.
+depends on it, deleting it cannot regress output, and it costs a `nasm` build
+dependency, ~1.1 MB of binary, 8.6 MB of source, and a documented-but-false claim
+in the README. Do it first, in isolation, so the diff is unambiguous. *(Done.)*
 
 **SIMD should not come first either.** Writing intrinsics against `Vec<i32>`
 planes with clamped per-sample gets would mean writing the SIMD *twice* — once
@@ -195,10 +195,24 @@ Only now, and only where Phase 0's re-profile says it pays.
 **Exit:** each kernel is bit-exact against its twin, corpus is 45/45, and the
 benchmark shows a measured per-kernel delta.
 
-### Phase 3 — Delete the assembly
+### Phase 3 — Delete the assembly — **DONE**
 
-Can be done at any point, and should be done **first** since it is free. Listed
-last only because it closes the arc.
+Done first, as this section recommended, because it was free.
+
+**Result:** 115 files and ~244k lines removed; 8.6 MB of assembly source and
+5.9 MB of `src/` gone; binary 4,455,936 → 3,347,968 bytes (−1.11 MB, −25%); the
+`nasm` build dependency and the `asm*` features are gone, so the crate now
+builds with cargo alone. Corpus 45/45 byte-identical and the test suite green at
+every step of the removal.
+
+One thing worth recording, because it is stronger than "unused": the MSAC
+bindings were not merely unreachable, they were **semantically wrong for AV2**.
+AV2 reworked the arithmetic coder's probability, adaptation, and bypass, so the
+dav1d assembly implements the AV1 formula and would have produced incorrect
+output. The bring-up comments said so explicitly at each dispatch site, and the
+AV2 path calls zero of the entry points that still had a live asm branch.
+
+Original scope, for reference:
 
 - Delete `src/x86/`, `src/arm/`, the `.asm`/`.S` sources, and the `nasm-rs` build
   path from `build.rs`.

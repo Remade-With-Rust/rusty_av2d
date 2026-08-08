@@ -60,18 +60,8 @@ honored in *both* directions.
 rusty_av2d = "0.1"
 ```
 
-Requires Rust 1.79+.
-
-On x86, the default features build the assembly inherited from `rav1d`, which
-needs [`nasm`](https://nasm.us/). **That assembly is currently dead code** — the
-AV2 decode path is entirely pure Rust and never dispatches to it (measured: the
-`asm` and no-`asm` builds are indistinguishable and byte-identical). It is
-scheduled for removal; see [`docs/plan.md`](docs/plan.md). Until then you can
-skip `nasm` entirely with no loss:
-
-```toml
-rusty_av2d = { version = "0.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
-```
+Requires Rust 1.79+. No `nasm`, no C toolchain, no build-time codegen — the
+crate is pure Rust and builds with cargo alone.
 
 ## Usage
 
@@ -126,16 +116,14 @@ default via the `capi` feature.
 
 Those symbol names are inherited from the dav1d lineage, which means they
 **collide at link time with any other decoder from that lineage** — notably
-`rav1d`. The assembly kernels export a handful of shared lookup tables under
-the same names, for the same reason. If you link both decoders into one
-binary, build with default features off:
+`rav1d`. If you link both decoders into one binary, build with default
+features off:
 
 ```toml
 rusty_av2d = { version = "0.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 ```
 
-That drops both the C ABI and the assembly paths, leaving no unmangled
-symbols. The safe Rust API is unaffected either way — this is exactly how
+That drops the C ABI, leaving no unmangled symbols. The safe Rust API is unaffected either way — this is exactly how
 [`remade_ffmpeg_rs`](https://github.com/Remade-With-Rust/remade_ffmpeg_rs)
 links AV1 and AV2 side by side.
 
@@ -147,8 +135,8 @@ These are real, and you should read them before building on this.
    vectors. "Correct" here means bit-exact against AVM as of this commit — the
    bitstream itself may still change under us.
 2. **Performance is unoptimized.** Correctness was the only goal. The decoder
-   is **fully scalar** — no SIMD, and no live assembly (see below). Samples are
-   stored one-per-`i32` with a bounds check on every read, which costs motion
+   is **fully scalar** — no SIMD and no assembly. Samples are stored
+   one-per-`i32` with a bounds check on every read, which costs motion
    compensation roughly 20× what the arithmetic alone would. Do not benchmark
    this against `libavm` and expect a fair fight.
    [`docs/plan.md`](docs/plan.md) has the profile and the plan to fix it.

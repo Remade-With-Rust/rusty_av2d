@@ -108,108 +108,11 @@ impl CpuFlags {
         combined_flags
     }
 
-    #[cfg(not(feature = "asm"))]
-    pub fn run_time_detect() -> Self {
+pub fn run_time_detect() -> Self {
         Self::empty()
     }
 
-    #[cfg(feature = "asm")]
-    pub fn run_time_detect() -> Self {
-        let mut flags = Self::empty();
 
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-        {
-            use raw_cpuid::CpuId;
-
-            if is_x86_feature_detected!("sse2") {
-                flags |= Self::SSE2;
-            }
-            if is_x86_feature_detected!("ssse3") {
-                flags |= Self::SSSE3;
-            }
-            if is_x86_feature_detected!("sse4.1") {
-                flags |= Self::SSE41;
-            }
-            if is_x86_feature_detected!("avx2") {
-                flags |= Self::AVX2;
-            }
-            if is_x86_feature_detected!("avx512f")
-                && is_x86_feature_detected!("avx512cd")
-                && is_x86_feature_detected!("avx512bw")
-                && is_x86_feature_detected!("avx512dq")
-                && is_x86_feature_detected!("avx512vl")
-                && is_x86_feature_detected!("avx512vnni")
-                && is_x86_feature_detected!("avx512ifma")
-                && is_x86_feature_detected!("avx512vbmi")
-                && is_x86_feature_detected!("avx512vbmi2")
-                && is_x86_feature_detected!("avx512vpopcntdq")
-                && is_x86_feature_detected!("avx512bitalg")
-                && is_x86_feature_detected!("gfni")
-                && is_x86_feature_detected!("vaes")
-                && is_x86_feature_detected!("vpclmulqdq")
-            {
-                flags |= Self::AVX512ICL;
-            }
-
-            /// Detect Excavator, Zen, Zen+, Zen 2, Zen 3, Zen 3+, Zen 4.
-            fn is_slow_gather() -> Option<()> {
-                let cpu_id = CpuId::new();
-
-                let vendor = cpu_id.get_vendor_info()?;
-                let is_amd = vendor.as_str() == "AuthenticAMD";
-                if !is_amd {
-                    return None;
-                }
-
-                let features = cpu_id.get_feature_info()?;
-                let family = features.family_id();
-
-                (family <= 0x19).then_some(())
-            }
-            if flags.contains(Self::AVX2) && is_slow_gather().is_some() {
-                flags |= Self::SLOW_GATHER;
-            }
-        }
-
-        #[cfg(target_arch = "arm")]
-        {
-            if std::arch::is_arm_feature_detected!("neon") {
-                flags |= Self::NEON;
-            }
-            if std::arch::is_arm_feature_detected!("dotprod") {
-                flags |= Self::DOTPROD;
-            }
-            if std::arch::is_arm_feature_detected!("i8mm") {
-                flags |= Self::I8MM;
-            }
-        }
-
-        #[cfg(target_arch = "aarch64")]
-        {
-            if std::arch::is_aarch64_feature_detected!("neon") {
-                flags |= Self::NEON;
-            }
-            if std::arch::is_aarch64_feature_detected!("dotprod") {
-                flags |= Self::DOTPROD;
-            }
-            if std::arch::is_aarch64_feature_detected!("i8mm") {
-                flags |= Self::I8MM;
-            }
-            if std::arch::is_aarch64_feature_detected!("sve") {
-                flags |= Self::SVE;
-            }
-            if std::arch::is_aarch64_feature_detected!("sve2") {
-                flags |= Self::SVE2;
-            }
-        }
-
-        #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-        if std::arch::is_riscv_feature_detected!("v") {
-            flags |= Self::V;
-        }
-
-        flags
-    }
 }
 
 /// This is atomic, which has interior mutability,

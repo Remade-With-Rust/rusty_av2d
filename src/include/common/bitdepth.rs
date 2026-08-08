@@ -421,53 +421,13 @@ pub type LeftPixelRow2px<Pixel> = [Pixel; 2];
 /// [`avx2`]: crate::cpu::CpuFlags::AVX2
 /// [`avx512icl`]: crate::cpu::CpuFlags::AVX512ICL
 /// [`neon`]: crate::cpu::CpuFlags::NEON
-#[cfg(all(
-    feature = "asm",
-    not(any(target_arch = "riscv64", target_arch = "riscv32"))
-))]
-macro_rules! bd_fn {
-    ($decl_fn:path, $BD:ty, $name:ident, $asm:ident) => {{
-        use paste::paste;
-        use $crate::include::common::bitdepth::BPC;
 
-        paste! {
-            match $BD::BPC {
-                BPC::BPC8 => $decl_fn!(fn [<dav1d_ $name _8bpc_ $asm>]),
-                BPC::BPC16 => $decl_fn!(fn [<dav1d_ $name _16bpc_ $asm>]),
-            }
-        }
-    }};
-
-    ($BD:ty, $name:ident, $asm:ident) => {{
-        use $crate::include::common::bitdepth::fn_identity;
-
-        bd_fn!(fn_identity, $BD, $name, $asm)
-    }};
-}
 
 /// Select and declare a [`BitDepth`]-dependent `extern "C" fn`.
 ///
 /// Similar to [`bd_fn!`] except that it selects which [`BitDepth`] `fn`
 /// based on `$bpc:literal bpc` instead of `$BD:ty`.
-#[cfg(all(
-    feature = "asm",
-    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
-))]
-macro_rules! bpc_fn {
-    ($bpc:literal bpc, $name:ident, $asm:ident) => {{
-        use $crate::include::common::bitdepth::fn_identity;
 
-        bpc_fn!(fn_identity, $bpc bpc, $name, $asm)
-    }};
-
-    ($decl_fn:path, $bpc:literal bpc, $name:ident, $asm:ident) => {{
-        use paste::paste;
-
-        paste! {
-            $decl_fn!(fn [<dav1d_ $name _ $bpc bpc_ $asm>])
-        }
-    }};
-}
 
 #[allow(unused)]
 macro_rules! fn_identity {
@@ -476,15 +436,7 @@ macro_rules! fn_identity {
     };
 }
 
-#[cfg(all(
-    feature = "asm",
-    not(any(target_arch = "riscv64", target_arch = "riscv32"))
-))]
-pub(crate) use bd_fn;
-#[cfg(all(
-    feature = "asm",
-    any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")
-))]
-pub(crate) use bpc_fn;
+
+
 #[allow(unused)]
 pub(crate) use fn_identity;

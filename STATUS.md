@@ -25,8 +25,8 @@ that are not superblock-aligned on either axis.
    vectors. "Correct" here means bit-exact against AVM/dav2d as of this commit;
    the bitstream may still change.
 2. **Performance is unoptimized.** Correctness was the only goal. The decoder
-   is fully scalar: no SIMD, and the assembly inherited from `rav1d` is dead code
-   that the AV2 path never dispatches to. Profiled, the classic vectorizable
+   is fully scalar: no SIMD and no assembly (the inherited `rav1d` assembly was
+   dead code for AV2 and has been removed). Profiled, the classic vectorizable
    kernels are only ~26% of runtime; most of the cost is the recon data path,
    where samples are stored one-per-`i32` and bounds-checked per access. The
    `work_tick` hardening guards were suspected to matter and measured not to

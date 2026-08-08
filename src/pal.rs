@@ -139,52 +139,13 @@ impl Rav1dPalDSPContext {
         }
     }
 
-    #[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-    #[inline(always)]
-    const fn init_x86(mut self, flags: CpuFlags) -> Self {
-        if !flags.contains(CpuFlags::SSSE3) {
-            return self;
-        }
 
-        self.pal_idx_finish = pal_idx_finish::decl_fn!(fn dav1d_pal_idx_finish_ssse3);
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            if !flags.contains(CpuFlags::AVX2) {
-                return self;
-            }
 
-            self.pal_idx_finish = pal_idx_finish::decl_fn!(fn dav1d_pal_idx_finish_avx2);
-
-            if !flags.contains(CpuFlags::AVX512ICL) {
-                return self;
-            }
-
-            self.pal_idx_finish = pal_idx_finish::decl_fn!(fn dav1d_pal_idx_finish_avx512icl);
-        }
-
-        self
-    }
-
-    #[cfg(all(feature = "asm", any(target_arch = "arm", target_arch = "aarch64")))]
-    #[inline(always)]
-    const fn init_arm(self, _flags: CpuFlags) -> Self {
-        self
-    }
 
     #[inline(always)]
     const fn init(self, flags: CpuFlags) -> Self {
-        #[cfg(feature = "asm")]
-        {
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                return self.init_x86(flags);
-            }
-            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-            {
-                return self.init_arm(flags);
-            }
-        }
+
 
         #[allow(unreachable_code)] // Reachable on some #[cfg]s.
         {

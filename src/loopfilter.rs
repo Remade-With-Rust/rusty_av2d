@@ -10,11 +10,7 @@ use crate::align::{Align16, AlignedVec2};
 use crate::cpu::CpuFlags;
 use crate::disjoint_mut::DisjointMut;
 use crate::ffi_safe::FFISafe;
-#[cfg(all(
-    feature = "asm",
-    not(any(target_arch = "riscv64", target_arch = "riscv32"))
-))]
-use crate::include::common::bitdepth::bd_fn;
+
 use crate::include::common::bitdepth::{AsPrimitive, BitDepth, DynPixel};
 use crate::include::common::intops::iclip;
 use crate::include::dav1d::picture::{
@@ -398,74 +394,13 @@ impl Rav1dLoopFilterDSPContext {
         }
     }
 
-    #[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-    #[inline(always)]
-    const fn init_x86<BD: BitDepth>(mut self, flags: CpuFlags) -> Self {
-        if !flags.contains(CpuFlags::SSSE3) {
-            return self;
-        }
 
-        self.loop_filter_sb.y.h = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_h_sb_y, ssse3);
-        self.loop_filter_sb.y.v = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_v_sb_y, ssse3);
-        self.loop_filter_sb.uv.h = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_h_sb_uv, ssse3);
-        self.loop_filter_sb.uv.v = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_v_sb_uv, ssse3);
 
-        #[cfg(target_arch = "x86_64")]
-        {
-            if !flags.contains(CpuFlags::AVX2) {
-                return self;
-            }
 
-            self.loop_filter_sb.y.h = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_h_sb_y, avx2);
-            self.loop_filter_sb.y.v = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_v_sb_y, avx2);
-            self.loop_filter_sb.uv.h = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_h_sb_uv, avx2);
-            self.loop_filter_sb.uv.v = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_v_sb_uv, avx2);
-
-            if !flags.contains(CpuFlags::AVX512ICL) {
-                return self;
-            }
-
-            self.loop_filter_sb.y.v = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_v_sb_y, avx512icl);
-            self.loop_filter_sb.uv.v = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_v_sb_uv, avx512icl);
-
-            if !flags.contains(CpuFlags::SLOW_GATHER) {
-                self.loop_filter_sb.y.h = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_h_sb_y, avx512icl);
-                self.loop_filter_sb.uv.h =
-                    bd_fn!(loopfilter_sb::decl_fn, BD, lpf_h_sb_uv, avx512icl);
-            }
-        }
-
-        self
-    }
-
-    #[cfg(all(feature = "asm", any(target_arch = "arm", target_arch = "aarch64")))]
-    #[inline(always)]
-    const fn init_arm<BD: BitDepth>(mut self, flags: CpuFlags) -> Self {
-        if !flags.contains(CpuFlags::NEON) {
-            return self;
-        }
-
-        self.loop_filter_sb.y.h = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_h_sb_y, neon);
-        self.loop_filter_sb.y.v = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_v_sb_y, neon);
-        self.loop_filter_sb.uv.h = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_h_sb_uv, neon);
-        self.loop_filter_sb.uv.v = bd_fn!(loopfilter_sb::decl_fn, BD, lpf_v_sb_uv, neon);
-
-        self
-    }
 
     #[inline(always)]
     const fn init<BD: BitDepth>(self, flags: CpuFlags) -> Self {
-        #[cfg(feature = "asm")]
-        {
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                return self.init_x86::<BD>(flags);
-            }
-            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-            {
-                return self.init_arm::<BD>(flags);
-            }
-        }
+
 
         #[allow(unreachable_code)] // Reachable on some #[cfg]s.
         {

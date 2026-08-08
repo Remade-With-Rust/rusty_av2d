@@ -10,15 +10,9 @@ use crate::align::AlignedVec64;
 use crate::cpu::CpuFlags;
 use crate::disjoint_mut::DisjointMut;
 use crate::ffi_safe::FFISafe;
-#[cfg(all(
-    feature = "asm",
-    not(any(target_arch = "riscv64", target_arch = "riscv32"))
-))]
-use crate::include::common::bitdepth::bd_fn;
-#[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-use crate::include::common::bitdepth::bpc_fn;
-#[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-use crate::include::common::bitdepth::BPC;
+
+
+
 use crate::include::common::bitdepth::{AsPrimitive, BitDepth, DynPixel, LeftPixelRow2px};
 use crate::include::common::intops::{apply_sign, iclip};
 use crate::include::dav1d::picture::{
@@ -513,164 +507,7 @@ fn cdef_find_dir_rust<BD: BitDepth>(
 }
 
 #[deny(unsafe_op_in_unsafe_fn)]
-#[cfg(all(feature = "asm", any(target_arch = "arm", target_arch = "aarch64")))]
-mod neon {
-    use std::mem::MaybeUninit;
 
-    use super::*;
-
-    wrap_fn_ptr!(unsafe extern "C" fn padding(
-        tmp: *mut MaybeUninit<u16>,
-        src: *const DynPixel,
-        src_stride: ptrdiff_t,
-        left: *const [LeftPixelRow2px<DynPixel>; 8],
-        top: *const DynPixel,
-        bottom: *const DynPixel,
-        h: c_int,
-        edges: CdefEdgeFlags,
-    ) -> ());
-
-    impl padding::Fn {
-        fn call<BD: BitDepth>(
-            &self,
-            tmp: &mut [MaybeUninit<u16>],
-            src: *const BD::Pixel,
-            src_stride: ptrdiff_t,
-            left: *const [LeftPixelRow2px<BD::Pixel>; 8],
-            top: *const BD::Pixel,
-            bottom: *const BD::Pixel,
-            h: usize,
-            edges: CdefEdgeFlags,
-        ) {
-            let tmp = tmp.as_mut_ptr();
-            let src = src.cast();
-            let left = left.cast();
-            let top = top.cast();
-            let bottom = bottom.cast();
-            let h = h as c_int;
-            // SAFETY: asm should be safe.
-            unsafe { self.get()(tmp, src, src_stride, left, top, bottom, h, edges) }
-        }
-
-        const fn neon<BD: BitDepth, const W: usize>() -> Self {
-            match W {
-                4 => bd_fn!(padding::decl_fn, BD, cdef_padding4, neon),
-                8 => bd_fn!(padding::decl_fn, BD, cdef_padding8, neon),
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    wrap_fn_ptr!(unsafe extern "C" fn filter(
-        dst: *mut DynPixel,
-        dst_stride: ptrdiff_t,
-        tmp: *const MaybeUninit<u16>,
-        pri_strength: c_int,
-        sec_strength: c_int,
-        dir: c_int,
-        damping: c_int,
-        h: c_int,
-        edges: usize,
-        bitdepth_max: c_int,
-    ) -> ());
-
-    impl filter::Fn {
-        fn call<BD: BitDepth>(
-            &self,
-            dst: *mut BD::Pixel,
-            dst_stride: ptrdiff_t,
-            tmp: &[MaybeUninit<u16>],
-            pri_strength: c_int,
-            sec_strength: c_int,
-            dir: c_int,
-            damping: c_int,
-            h: usize,
-            edges: CdefEdgeFlags,
-            bd: BD,
-        ) {
-            let dst = dst.cast();
-            let tmp = tmp.as_ptr();
-            let h = h as c_int;
-            let edges = edges.bits() as usize;
-            let bd = bd.into_c();
-            // SAFETY: asm should be safe.
-            unsafe {
-                self.get()(
-                    dst,
-                    dst_stride,
-                    tmp,
-                    pri_strength,
-                    sec_strength,
-                    dir,
-                    damping,
-                    h,
-                    edges,
-                    bd,
-                )
-            }
-        }
-
-        const fn neon<BD: BitDepth, const W: usize>() -> Self {
-            match W {
-                4 => bd_fn!(filter::decl_fn, BD, cdef_filter4, neon),
-                8 => bd_fn!(filter::decl_fn, BD, cdef_filter8, neon),
-                _ => unreachable!(),
-            }
-        }
-    }
-
-    #[deny(unsafe_op_in_unsafe_fn)]
-    pub unsafe extern "C" fn cdef_filter_neon_erased<
-        BD: BitDepth,
-        const W: usize,
-        const H: usize,
-        const TMP_STRIDE: usize,
-        const TMP_LEN: usize,
-    >(
-        dst: *mut DynPixel,
-        stride: ptrdiff_t,
-        left: *const [LeftPixelRow2px<DynPixel>; 8],
-        top: *const DynPixel,
-        bottom: *const DynPixel,
-        pri_strength: c_int,
-        sec_strength: c_int,
-        dir: c_int,
-        damping: c_int,
-        edges: CdefEdgeFlags,
-        bitdepth_max: c_int,
-        _dst: FFISafeRav1dPictureDataComponentOffset,
-        _top: WithOffset<*const FFISafe<DisjointMut<AlignedVec64<u8>>>>,
-        _bottom: WithOffset<*const FFISafe<PicOrBuf<'_, AlignedVec64<u8>>>>,
-    ) {
-        use crate::align::Align16;
-
-        let dst = dst.cast();
-        let left = left.cast();
-        let top = top.cast();
-        let bottom = bottom.cast();
-        let bd = BD::from_c(bitdepth_max);
-
-        // Use `MaybeUninit` here to avoid over-initialization.
-        // C doesn't initialize this either and only partially initializes it in `padding`.
-        // Since we're just passing this to a few asm calls that are `unsafe` anyways,
-        // initializing this in Rust doesn't really add any extra safety.
-        let mut tmp_buf = Align16([MaybeUninit::uninit(); TMP_LEN]);
-        let tmp = &mut tmp_buf.0[2 * TMP_STRIDE + 8..];
-        padding::Fn::neon::<BD, W>().call::<BD>(tmp, dst, stride, left, top, bottom, H, edges);
-        filter::Fn::neon::<BD, W>().call(
-            dst,
-            stride,
-            tmp,
-            pri_strength,
-            sec_strength,
-            dir,
-            damping,
-            H,
-            edges,
-            bd,
-        );
-    }
-}
 
 impl Rav1dCdefDSPContext {
     pub const fn default<BD: BitDepth>() -> Self {
@@ -684,92 +521,13 @@ impl Rav1dCdefDSPContext {
         }
     }
 
-    #[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-    #[inline(always)]
-    const fn init_x86<BD: BitDepth>(mut self, flags: CpuFlags) -> Self {
-        if matches!(BD::BPC, BPC::BPC8) {
-            if !flags.contains(CpuFlags::SSE2) {
-                return self;
-            }
 
-            self.fb[0] = bpc_fn!(cdef::decl_fn, 8 bpc, cdef_filter_8x8, sse2);
-            self.fb[1] = bpc_fn!(cdef::decl_fn, 8 bpc, cdef_filter_4x8, sse2);
-            self.fb[2] = bpc_fn!(cdef::decl_fn, 8 bpc, cdef_filter_4x4, sse2);
-        }
 
-        if !flags.contains(CpuFlags::SSSE3) {
-            return self;
-        }
 
-        self.dir = bd_fn!(cdef_dir::decl_fn, BD, cdef_dir, ssse3);
-        self.fb[0] = bd_fn!(cdef::decl_fn, BD, cdef_filter_8x8, ssse3);
-        self.fb[1] = bd_fn!(cdef::decl_fn, BD, cdef_filter_4x8, ssse3);
-        self.fb[2] = bd_fn!(cdef::decl_fn, BD, cdef_filter_4x4, ssse3);
-
-        if !flags.contains(CpuFlags::SSE41) {
-            return self;
-        }
-
-        self.dir = bd_fn!(cdef_dir::decl_fn, BD, cdef_dir, sse4);
-        if matches!(BD::BPC, BPC::BPC8) {
-            self.fb[0] = bpc_fn!(cdef::decl_fn, 8 bpc, cdef_filter_8x8, sse4);
-            self.fb[1] = bpc_fn!(cdef::decl_fn, 8 bpc, cdef_filter_4x8, sse4);
-            self.fb[2] = bpc_fn!(cdef::decl_fn, 8 bpc, cdef_filter_4x4, sse4);
-        }
-
-        #[cfg(target_arch = "x86_64")]
-        {
-            if !flags.contains(CpuFlags::AVX2) {
-                return self;
-            }
-
-            self.dir = bd_fn!(cdef_dir::decl_fn, BD, cdef_dir, avx2);
-            self.fb[0] = bd_fn!(cdef::decl_fn, BD, cdef_filter_8x8, avx2);
-            self.fb[1] = bd_fn!(cdef::decl_fn, BD, cdef_filter_4x8, avx2);
-            self.fb[2] = bd_fn!(cdef::decl_fn, BD, cdef_filter_4x4, avx2);
-
-            if !flags.contains(CpuFlags::AVX512ICL) {
-                return self;
-            }
-
-            self.fb[0] = bd_fn!(cdef::decl_fn, BD, cdef_filter_8x8, avx512icl);
-            self.fb[1] = bd_fn!(cdef::decl_fn, BD, cdef_filter_4x8, avx512icl);
-            self.fb[2] = bd_fn!(cdef::decl_fn, BD, cdef_filter_4x4, avx512icl);
-        }
-
-        self
-    }
-
-    #[cfg(all(feature = "asm", any(target_arch = "arm", target_arch = "aarch64")))]
-    #[inline(always)]
-    const fn init_arm<BD: BitDepth>(mut self, flags: CpuFlags) -> Self {
-        use self::neon::cdef_filter_neon_erased;
-
-        if !flags.contains(CpuFlags::NEON) {
-            return self;
-        }
-
-        self.dir = bd_fn!(cdef_dir::decl_fn, BD, cdef_find_dir, neon);
-        self.fb[0] = cdef::Fn::new(cdef_filter_neon_erased::<BD, 8, 8, 16, { 12 * 16 + 8 }>);
-        self.fb[1] = cdef::Fn::new(cdef_filter_neon_erased::<BD, 4, 8, 8, { 12 * 8 + 8 }>);
-        self.fb[2] = cdef::Fn::new(cdef_filter_neon_erased::<BD, 4, 4, 8, { 12 * 8 + 8 }>);
-
-        self
-    }
 
     #[inline(always)]
     const fn init<BD: BitDepth>(self, flags: CpuFlags) -> Self {
-        #[cfg(feature = "asm")]
-        {
-            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-            {
-                return self.init_x86::<BD>(flags);
-            }
-            #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-            {
-                return self.init_arm::<BD>(flags);
-            }
-        }
+
 
         #[allow(unreachable_code)] // Reachable on some #[cfg]s.
         {
