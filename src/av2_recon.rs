@@ -1853,6 +1853,12 @@ pub fn decode_sb_luma(s: &mut SbState, bs: usize, bx4: usize, by4: usize) -> u32
     let (iw4, ih4) = (s.iw4, s.ih4);
     let have_h_split = iw4 > bx4 + bw4 / 2;
     let have_v_split = ih4 > by4 + bh4 / 2;
+    // Key-frame twin of the inter path's [SBI] probe, aligned with avm's PARTPROBE `[PARTIN]`
+    // (decodeframe.c:1843) so the two traces diff node-for-node. `rng` is printed at partition-node
+    // ENTRY, as avm's is; `dif` comes too, because rng alone hides bypass-only divergences.
+    if std::env::var("PARTIN").is_ok() {
+        crate::dlog!("[PARTIN] mi=({bx4},{by4}) bs={bs} rng={} dif={:x}", s.msac.rng, s.msac.dif);
+    }
     let (bp, _half) = decode_partition(
         s.msac, &mut s.cdf.m, bs, &s.a_part, &s.l_part, bx4, by4, have_h_split, have_v_split, 3,
         true, 0, 0, 0, iw4, ih4, false,
@@ -5657,6 +5663,42 @@ pub fn decode_sb_inter(
 /// that records the first leaf's entry rng and aborts further recursion via `done`, so the
 /// emitted partition rngs can be diffed against the oracle's chroma `read_partition` lines.
 #[allow(clippy::too_many_arguments)]
+/// SDP: map a *shared* luma partition onto the chroma tree's partition — avm
+/// `sdp_chroma_part_from_luma` (common_data.h:331), keyed on the CHROMA dimensions.
+///
+/// The extended types are the whole point: a luma `HORZ_3` shares as chroma `HORZ_3`
+/// (three sub-blocks) whenever the chroma height still reaches 16. Collapsing anything
+/// that is not H/V to `None` decodes ONE chroma leaf where the bitstream holds three,
+/// which desyncs the entropy decoder for the rest of the frame.
+///
+/// `luma_part` is the raw partition code (this crate's `BlockPartition` discriminants,
+/// which match avm's `PARTITION_TYPE` values one-for-one); `bw`/`bh` are the LUMA
+/// dimensions in pixels, shifted here by the subsampling.
+fn sdp_chroma_part_from_luma(
+    luma_part: u32,
+    bw: usize,
+    bh: usize,
+    ss_hor: usize,
+    ss_ver: usize,
+) -> crate::av2_decode::BlockPartition {
+    use crate::av2_decode::BlockPartition as P;
+    let bh_chr = bh >> ss_ver;
+    let bw_chr = bw >> ss_hor;
+    match luma_part {
+        0 => P::None,
+        1 => if bh_chr < 8 { P::None } else { P::H },
+        2 => if bw_chr < 8 { P::None } else { P::V },
+        3 => if bh_chr >= 16 { P::H3 } else if bh_chr < 8 { P::None } else { P::H },
+        4 => if bw_chr >= 16 { P::V3 } else if bw_chr < 8 { P::None } else { P::V },
+        5 => if bh_chr >= 32 { P::H4a } else if bh_chr >= 8 { P::H } else { P::None },
+        6 => if bh_chr >= 32 { P::H4b } else if bh_chr >= 8 { P::H } else { P::None },
+        7 => if bw_chr >= 32 { P::V4a } else if bw_chr >= 8 { P::V } else { P::None },
+        8 => if bw_chr >= 32 { P::V4b } else if bw_chr >= 8 { P::V } else { P::None },
+        9 => if bh_chr < 8 || bw_chr < 8 { P::None } else { P::Split },
+        _ => P::None,
+    }
+}
+
 pub fn decode_sb_chroma(
     msac: &mut crate::msac::MsacContext,
     cdf: &mut crate::cdf_av2::CdfContext,
@@ -5678,6 +5720,12 @@ pub fn decode_sb_chroma(
     // Frame-boundary split availability (luma coords, same as luma tree).
     let have_h_split = iw4 > bx4 + bw4 / 2;
     let have_v_split = ih4 > by4 + bh4 / 2;
+    // Chroma-tree half of the [PARTIN] probe. avm's PARTPROBE emits BOTH trees into one stream
+    // (luma nodes, then the SDP chroma tree restarting at the SB origin), so this has to fire too
+    // or the two traces cannot be aligned past the first SB.
+    if std::env::var("PARTIN").is_ok() {
+        crate::dlog!("[PARTINC] mi=({bx4},{by4}) bs={bs} rng={} dif={:x}", msac.rng, msac.dif);
+    }
     // SDP chroma root (64x64): F164 inference from the luma `dir_ptr`. If luma did not
     // split (byte0 == 0xff) the chroma is NONE; if luma split one way and *all* its direct
     // children split the other (the 0x10002 / 0x20001 patterns over bits 0-1 | 16-17), the
@@ -5688,11 +5736,7 @@ pub fn decode_sb_chroma(
         if byte0 == 0xff {
             BlockPartition::None
         } else if mask3 == 0x10002 || mask3 == 0x20001 {
-            match (luma_dirptr >> 8) & 0xff {
-                1 => BlockPartition::H,
-                2 => BlockPartition::V,
-                _ => BlockPartition::None,
-            }
+            sdp_chroma_part_from_luma((luma_dirptr >> 8) & 0xff, bw4 * 4, bh4 * 4, css.0, css.1)
         } else {
             decode_partition(msac, &mut cdf.m, bs, a_part, l_part, bx4, by4, have_h_split, have_v_split, 3, true, 1, css.0 as u32, css.1 as u32, iw4, ih4, false).0
         }
