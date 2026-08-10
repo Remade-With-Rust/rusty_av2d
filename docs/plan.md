@@ -3,6 +3,14 @@
 **Status:** Phase 3 (assembly removal) is **done**. Phases 0–2 are proposed.
 Written 2026-08-07 against `rusty_av2d` 0.1.3.
 
+**2026-08-10 — the inherited C tree is gone too.** Separate from the assembly:
+rav1d carried dav1d's original C sources alongside its Rust port, and this fork
+inherited 124 `.c`/`.h` files (~37,600 lines) plus the meson build that drove
+them. Dead in every sense — nothing compiled it, nothing referenced it, and it
+was already excluded from the published package — but it made a pure-Rust
+decoder read as roughly 30% C. Deleted; corpus 47/47 and 112 tests unchanged,
+and the published package is byte-for-byte identical, so no release was needed.
+
 The goal is a decoder that is fast because of portable Rust SIMD, and that carries
 no hand-written assembly at all. This document says what we measured, why the
 obvious ordering is wrong, and what to do in what order.

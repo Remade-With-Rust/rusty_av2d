@@ -8,7 +8,7 @@ description = "CLI tools for the rusty_av2d pure-Rust AV2 decoder"
 license = "BSD-2-Clause"
 repository = "https://github.com/Remade-With-Rust/rusty_av2d"
 publish = false
-exclude = ["*.c", "*.h", "*.in", "meson*"]
+# `exclude` for C/meson artefacts dropped along with the inherited dav1d C tree.
 
 [[bin]]
 path = "dav1d.rs"

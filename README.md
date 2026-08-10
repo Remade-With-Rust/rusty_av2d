@@ -185,6 +185,14 @@ pure-Rust AV1 decoder, which is itself a port of
 retargeted to AV2 by inverting the AVM reference decoder's parse, brick by
 brick, against a symbol-level oracle.
 
+Because rav1d was produced by porting dav1d, its repository carried dav1d's
+original C sources alongside the Rust, and this fork inherited them: 124
+`.c`/`.h` files, ~37,600 lines, plus the meson build that drove them. **None of
+it was ever compiled** — no `cc` build dependency, nothing in `build.rs`, no
+Rust reference — and it was already excluded from the published package. But it
+sat in the repository making a pure-Rust decoder read as roughly 30% C. It has
+been deleted, along with the assembly (see [`docs/plan.md`](docs/plan.md)).
+
 Licensed **BSD-2-Clause**, retained in full from upstream — see
 [`COPYING`](COPYING) and [`NOTICE.md`](NOTICE.md). Copyright is held by the
 dav1d authors, VideoLAN, Two Orioles LLC, the Rav1d Developers, and Prossimo,

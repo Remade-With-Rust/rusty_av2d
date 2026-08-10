@@ -15,10 +15,9 @@ homepage = "https://github.com/Remade-With-Rust/rusty_av2d"
 readme = "README.md"
 keywords = ["av2", "video", "codec", "decoder", "avm"]
 categories = ["multimedia::video", "multimedia"]
-exclude = [
-    "*.c", "*.h", "*.in", "meson*", "tests/", "doc/", "package/",
-    "examples/", "retranspile.sh", "NEWS.dav1d",
-]
+# No `exclude` needed: the tree is Rust. Every entry that used to live here
+# (`*.c`, `*.h`, `meson*`, `retranspile.sh`, `NEWS.dav1d`, ...) existed only to keep
+# the inherited dav1d C decoder out of the published package; that tree is gone.
 
 [lib]
 name = "rusty_av2d"
