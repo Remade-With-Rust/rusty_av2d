@@ -2523,6 +2523,14 @@ pub(crate) fn av2_pop_pending(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1d
 /// `dpb_poc + 1` chain of implicit refs. First picture -> `state.out`, rest -> AV2_PENDING.
 fn emit_av2_output(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult<()> {
     use crate::av2_recon::{get_poc_diff, AV2_DPB_POC, AV2_SHOW, CUR_REF_POC, REF_SLOTS};
+    // A frame whose work budget tripped unwound its walkers mid-decode: the plane
+    // buffers hold PARTIAL content. Delivering that as a successful picture is the
+    // silent-wrong-output failure mode this decoder exists to avoid — surface it.
+    // (work_tick already logged the site; the flag resets at the next frame's
+    // work_reset, so a later clean sequence recovers.)
+    if crate::av2_recon::work_dead() {
+        return Err(Rav1dError::InvalidArgument);
+    }
     let (show, _implicit) = AV2_SHOW.with(|x| x.get());
     if !show {
         return Ok(()); // not shown now; its ref slot (show_implicit) feeds a later queue flush
@@ -2612,11 +2620,19 @@ fn emit_av2_output(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult<()> 
 }
 
 fn emit_av2_planes(c: &Rav1dContext, state: &mut Rav1dState, planes: &[crate::av2_frame::Plane; 3]) -> Rav1dResult<()> {
+    // Same partial-frame guard as emit_av2_output (this is the TIP-as-output path).
+    if crate::av2_recon::work_dead() {
+        return Err(Rav1dError::InvalidArgument);
+    }
     use crate::include::common::bitdepth::BitDepth8;
     let seq_hdr = state.seq_hdr.clone().ok_or(Rav1dError::InvalidArgument)?;
     let (w, h) = (planes[0].w, planes[0].h);
     if w == 0 {
-        return Ok(());
+        // Empty planes at emit time = an upstream bug fabricated a frame with no
+        // content. Silently returning Ok here dropped the picture from the output
+        // while reporting success — the short-output failure mode is invisible to
+        // a caller counting on exit status. Fail loudly instead.
+        return Err(Rav1dError::InvalidArgument);
     }
     // Minimal frame header so the output path (has_grain → film_grain) doesn't unwrap a None;
     // film_grain defaults to no points, and the muxer takes dimensions from p.w/p.h, not this.

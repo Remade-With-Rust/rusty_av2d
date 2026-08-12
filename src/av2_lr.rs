@@ -529,7 +529,14 @@ pub fn lr_filter_chroma(
             let filter: &[i8; 18] = match (&unit_f, pd.ffon) {
                 (Some(f), _) => f,
                 (None, true) => &pd.filter[0], // frame filters, chroma single-class
-                (None, false) => continue,     // NS unit with no decoded filters: nothing to apply
+                (None, false) => {
+                    // An NS unit whose banked filters are missing = the parse/apply unit
+                    // keying disagrees (the bug class the cpu3 campaign was made of).
+                    // Skipping silently would ship an unfiltered unit as success — say so.
+                    crate::dlog!("[rav2d] WARNING: NS restoration unit (p={p} x={x0} y={ay}) has no banked filters — unit left unfiltered (keying bug?)");
+                    debug_assert!(false, "NS unit without banked filters: p={p} x0={x0} ay={ay}");
+                    continue;
+                }
             };
             for y in sy0..sy1 {
                 for x in x0..x1 {
