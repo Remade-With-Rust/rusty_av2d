@@ -1699,6 +1699,11 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         });
     }
     // ---- 1. DEBLOCK (all planes, in place) ----
+    if let Ok(path) = std::env::var("MDUMP_RECON") {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        for v in pl0.iter() { f.write_all(&(*v as u16).to_le_bytes()).unwrap(); }
+    }
     if std::env::var("MDBW").is_ok() {
         crate::av2_deblock::QMAP.with(|w| *w.borrow_mut() = vec![-1i16; 6 * 6480]);
     }
@@ -1787,6 +1792,11 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         deblock_plane(&mut pl2, ciw4, cih4, cw, &cdb_lw, &cdb_lh, &cdb_left, &cdb_top, q, s, q, s, sbt, &cdb_spv, &cdb_sph, bdmax, &MAX_WIDTH_UV_TBL, 16 >> SS.with(|c| c.get()).1, 2, true, true, &tile_v_c);
     }
     stage_cmp("POST-DEBLK", &pl0, &pl1, &pl2, w, h, cw, ch, &crate::av2_recon::cap_path("dav_f2postdeblk.yuv"));
+    if let Ok(path) = std::env::var("MDUMP_PD") {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        for v in pl0.iter() { f.write_all(&(*v as u16).to_le_bytes()).unwrap(); }
+    }
     // Debug: replace mine's post-deblock with dav's (same-run) so CDEF/CCSO/GDF are tested on
     // perfect input, removing any deblock cascade. Isolates cdef/ccso/gdf param bugs.
     if std::env::var("FORCE_PD").is_ok() {
@@ -1797,6 +1807,11 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     }
     // Post-deblock luma: CCSO classification source + GDF guided reference.
     let deblk_luma = pl0.clone();
+    // Post-deblock chroma: LR stripe-boundary rows for the chroma NS-Wiener apply
+    // (avm save_deblock_boundary_lines runs per plane; only the +-2 rows at stripe
+    // edges are read from these).
+    let deblk_u = pl1.clone();
+    let deblk_v = pl2.clone();
 
     // env OH1PD: dump the POST-DEBLOCK planes for the oh=1 frame (filter-stage A/B vs dav PD1).
     if std::env::var("MDBW").is_ok() {
@@ -2019,6 +2034,11 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     }
 
     stage_cmp("POST-CDEF", &pl0, &pl1, &pl2, w, h, cw, ch, &crate::av2_recon::cap_path("dav_f2postcdef.yuv"));
+    if let Ok(path) = std::env::var("MDUMP_CDEF") {
+        use std::io::Write;
+        let mut f = std::fs::File::create(path).unwrap();
+        for v in pl0.iter() { f.write_all(&(*v as u16).to_le_bytes()).unwrap(); }
+    }
     // ---- 3b. LOOP RESTORATION (NS/PC-Wiener), luma. The wiener reads the pre-wiener
     // (post-CCSO) snapshot with post-deblock stripe-boundary rows; GDF's guided input
     // stays PRE-wiener (dav lr_stripe: gdf_prep before wiener, gdf_add after). ----
@@ -2028,14 +2048,24 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             let f = fr.borrow();
             (f.lr_noskip.clone(), f.iw4)
         });
-        crate::av2_lr::LR_CFG.with(|c| {
-            let cfg = c.borrow();
-            if cfg.p[1].r_type != 0 || cfg.p[2].r_type != 0 {
-                crate::dlog!("[rav2d] WARNING: CHROMA loop restoration not implemented (types u={} v={})", cfg.p[1].r_type, cfg.p[2].r_type);
-            }
-        });
         let src = pl0.clone();
+        if let Ok(path) = std::env::var("MLRPRE") {
+            use std::io::Write;
+            let mut f = std::fs::File::create(path).unwrap();
+            for v in src.iter() { f.write_all(&(*v as u16).to_le_bytes()).unwrap(); }
+        }
         crate::av2_lr::lr_filter_luma(&mut pl0, &src, &deblk_luma, w, h, yac as u32, bdmax, &lr_noskip, f_iw4);
+        // Chroma NS-Wiener (cross-component): reads the PRE-LR luma (`src`) through the
+        // CfL-style downsample, never the freshly filtered pl0 -- avm builds its ds-luma
+        // copy before any LR is applied (wienerns_copy_luma_with_virtual_lines).
+        {
+            let (ssh, ssv) = { let s = crate::av2_frame::SS.with(|c| c.get()); (s.0 as usize, s.1 as usize) };
+            let ds_type = crate::av2_recon::HDR_TOOL_CFG.with(|c| c.get().cfl_ds_filter);
+            let srcu = pl1.clone();
+            crate::av2_lr::lr_filter_chroma(&mut pl1, &srcu, &deblk_u, 1, cw, ch, &src, &deblk_luma, w, h, ssh, ssv, ds_type, bdmax);
+            let srcv = pl2.clone();
+            crate::av2_lr::lr_filter_chroma(&mut pl2, &srcv, &deblk_v, 2, cw, ch, &src, &deblk_luma, w, h, ssh, ssv, ds_type, bdmax);
+        }
         lr_src = Some(src);
     }
     // ---- 4. GDF (luma only: PRE-wiener guided input, post-deblock reference) ----

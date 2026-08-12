@@ -2074,6 +2074,26 @@ pub fn decode_sb_key(
     if bs >= 6 {
         // SDP fork at the 64x64 boundary: fresh dir accumulator, luma then chroma.
         let dirptr = decode_sb_luma(s, bs, bx4, by4);
+        // CHROMA restoration units are read at the CHROMA pass root — after the whole
+        // luma subtree, before the chroma tree (avm decodeframe.c:2081 via
+        // get_partition_plane_start(CHROMA_PART)=1; corners gate on bsize == sb_size).
+        // Only when this 64-region IS the SB root; for 128px SBs the chroma pass root
+        // is the 128 block, a schedule no current stream exercises with chroma LR.
+        if (bx4 | by4) & (sb_step4() - 1) == 0 {
+            if sb_step4() == 16 {
+                let css = ss_g();
+                crate::av2_lr::read_lr_units_sb(
+                    s.msac, s.cdf, bx4, by4, s.iw4, s.ih4, css.0, css.1, 1, 3,
+                );
+            } else {
+                crate::av2_lr::LR_CFG.with(|c| {
+                    let cfg = c.borrow();
+                    if cfg.p[1].r_type != 0 || cfg.p[2].r_type != 0 {
+                        crate::dlog!("[rav2d] WARNING: chroma LR with 128px SBs is unverified (no oracle stream)");
+                    }
+                });
+            }
+        }
         let map = s.luma_dir_map;
         decode_sb_chroma(s.msac, s.cdf, uv_a, uv_l, bs, bx4, by4, dirptr, &map, uv_nb, s.iw4, s.ih4);
         return;

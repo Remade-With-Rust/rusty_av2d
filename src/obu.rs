@@ -1123,10 +1123,20 @@ fn parse_av2_frame_hdr_front(
                                 }
                                 pd.num_classes_idx = rpd.num_classes_idx;
                                 pd.num_classes = rpd.num_classes;
-                            } else {
+                            } else if p == 0 {
+                                // The 3-bit class-count literal is coded only when the plane's
+                                // class ceiling exceeds 1 (avm decode_restoration_mode:
+                                // `frame_filters_on && max_num_classes(p) > 1`). max_num_classes
+                                // is 16 for luma and **1 for chroma** — so chroma NEVER codes it.
+                                // Reading it unconditionally stole 3 raw header bits per chroma
+                                // plane with ffon, shifting every field after it (the cpu3
+                                // real-photo repro: 99.5% of bytes wrong).
                                 let val = gb.get_bits(3) as i32;
                                 pd.num_classes_idx = val as u8;
                                 pd.num_classes = (1 + val + (val - 3).max(0) + (val - 5).max(0) * 2) as u8;
+                            } else {
+                                pd.num_classes_idx = 0;
+                                pd.num_classes = 1; // NUM_WIENERNS_CLASS_INIT_CHROMA
                             }
                         } else {
                             pd.num_classes_idx = 0;
@@ -1293,7 +1303,7 @@ fn parse_av2_frame_hdr_front(
                     }
                 }
                 if std::env::var("MLRH").is_ok() {
-                    crate::dlog!("[MLRH] restoration y={} u={} v={} ffon={} ncls={} usz={} nbits={}", lr.p[0].r_type, lr.p[1].r_type, lr.p[2].r_type, lr.p[0].ffon as u8, lr.p[0].num_classes, lr.unit_size[0], gb.pos() - lr_off0);
+                    crate::dlog!("[MLRH] restoration y={} u={} v={} ffon={}/{}/{} ncls={} usz={}/{} nbits={}", lr.p[0].r_type, lr.p[1].r_type, lr.p[2].r_type, lr.p[0].ffon as u8, lr.p[1].ffon as u8, lr.p[2].ffon as u8, lr.p[0].num_classes, lr.unit_size[0], lr.unit_size[1], gb.pos() - lr_off0);
                     if lr.p[0].ffon {
                         for n in 0..lr.p[0].num_classes as usize {
                             crate::dlog!("[MLRF] p=0 n={n}: {:?}", &lr.p[0].filter[n][..16]);
@@ -3141,6 +3151,7 @@ fn parse_obus(
                                             &mut msac_t, &mut cdf_t, bx_sb, by_sb, f2iw4, f2ih4,
                                             (seq_hdr.layout != Rav1dPixelLayout::I444) as usize,
                                             (seq_hdr.layout == Rav1dPixelLayout::I420) as usize,
+                                            0, 3, // SHARED tree: all planes at the SB root
                                         );
                                         let mut ldm = [0xffu8; 256];
                                         crate::av2_recon::decode_sb_inter(
@@ -3185,6 +3196,7 @@ fn parse_obus(
                                 &mut msac_sb, &mut cdf_sb, bx_sb, by_sb, f2iw4, f2ih4,
                                 (seq_hdr.layout != Rav1dPixelLayout::I444) as usize,
                                 (seq_hdr.layout == Rav1dPixelLayout::I420) as usize,
+                                0, 3, // SHARED tree: all planes at the SB root
                             );
                             let mut ldm = [0xffu8; 256];
                             crate::av2_recon::decode_sb_inter(
@@ -3612,6 +3624,7 @@ fn parse_obus(
                             sb.msac, sb.cdf, bx_sb, by_sb, sb.iw4, sb.ih4,
                             (seq_hdr.layout != Rav1dPixelLayout::I444) as usize,
                             (seq_hdr.layout == Rav1dPixelLayout::I420) as usize,
+                            0, 1, // LUMA pass; planes 1..3 are read at the SDP fork
                         );
                         sb.luma_dir_map = [0xff; 256];
                         sb.filters_done = false;

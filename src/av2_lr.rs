@@ -68,6 +68,12 @@ thread_local! {
     /// Per-frame parsed LR units: (plane, aligned_px_x, aligned_px_y) -> unit type.
     pub static LR_UNITS: RefCell<std::collections::HashMap<(u8, usize, usize), u8>> =
         RefCell::new(std::collections::HashMap::new());
+    /// Per-unit NS filters for planes whose frame filters are OFF (`!ffon`): the unit
+    /// codes its own filters against the tile bank; the apply must use THIS unit's
+    /// decoded set, not the (empty) frame-filter slot. Keyed like LR_UNITS; value =
+    /// the bank's slot-4 stash right after the unit's read, one row per class.
+    pub static LR_UNIT_FILTERS: RefCell<std::collections::HashMap<(u8, usize, usize), [[i8; 18]; 16]>> =
+        RefCell::new(std::collections::HashMap::new());
 }
 
 /// dav decode.c:86 `init_wiener` q-bucket: 0..3 from the frame's yac qindex.
@@ -358,6 +364,183 @@ pub fn lr_filter_luma(
     }
 }
 
+/// Chroma NS-Wiener symmetric UV tap pairs, one representative `[dr,dc]` per pair
+/// (avm `wienerns_simd_config_uv_from_uv`, features 0..5; the `{0,0,18}` center entry
+/// is excluded by `num_pixels = len-1`, its effect carried by the subtract-center form).
+const WIENER_NS_CONFIG_UV: [[i8; 2]; 6] = [[1, 0], [0, 1], [1, 1], [-1, 1], [2, 0], [0, 2]];
+/// Cross-component taps into the downsampled luma (avm `wienerns_simd_config_uv_from_y`,
+/// asymmetric singles; filter positions 6..17 in config order).
+const WIENER_NS_CONFIG_UV_Y: [[i8; 2]; 12] = [
+    [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1],
+    [-1, 1], [1, -1], [2, 0], [-2, 0], [0, 2], [0, -2],
+];
+
+/// Chroma NS-Wiener loop restoration, whole-frame (avm `apply_wienerns_class_id_highbd`,
+/// dual-input branch → `av2_convolve_nonsep_dual_highbd`).
+///
+/// The cross-component taps read a LUMA image downsampled to chroma resolution with the
+/// seq's CfL downsample filter (`WIENERNS_CROSS_FILT_LUMA_TYPE == 2`:
+/// `calc_wienerns_ds_luma_420`; 422/444 point-sample). avm builds that copy BEFORE any
+/// LR applies (`wienerns_copy_luma_with_virtual_lines`), so the luma input here is the
+/// PRE-LR luma (`src_l`), with the stripe-boundary virtual lines: the ±2 luma rows at
+/// each stripe edge are the POST-DEBLOCK rows (`dblk_l`), and rows beyond those two are
+/// plain pre-LR interior — unlike the chroma plane itself, whose out-of-stripe rows use
+/// the standard replicate-the-saved-rows rule exactly like the luma apply.
+///
+/// Chroma is always single-class (`NUM_WIENERNS_CLASS_INIT_CHROMA == 1`), so there is no
+/// classifier; `clip_base` in the reference is the identity, so tap differences are used
+/// raw. PC-Wiener chroma units have no oracle stream yet and are refused loudly.
+#[allow(clippy::too_many_arguments)]
+pub fn lr_filter_chroma(
+    dst: &mut [i32],
+    src: &[i32],
+    dblk: &[i32],
+    p: usize,
+    cw: usize,
+    ch: usize,
+    src_l: &[i32],
+    dblk_l: &[i32],
+    lw: usize,
+    lh: usize,
+    ssh: usize,
+    ssv: usize,
+    ds_type: u8,
+    bdmax: i32,
+) {
+    let cfg = LR_CFG.with(|c| c.borrow().clone());
+    let pd = &cfg.p[p];
+    if pd.r_type == REST_NONE {
+        return;
+    }
+    if std::env::var("MLRU").is_ok() {
+        crate::dlog!("[MLRC] p={p} ds_type={ds_type} ffon={} ncls={} unit={} cw={cw} ch={ch}", pd.ffon as u8, pd.num_classes, 1usize << cfg.unit_size[1]);
+    }
+    let unit_sz_log2 = cfg.unit_size[1] as usize;
+    let unit_sz = 1usize << unit_sz_log2;
+    let units = LR_UNITS.with(|u| u.borrow().clone());
+    // Stripe geometry in chroma rows: first stripe 64-8 luma rows, then 64-row bands,
+    // all >> ss_v (avm limits: RESTORATION_PROC_UNIT_SIZE / RESTORATION_UNIT_OFFSET >> ss_y).
+    let band = 64usize >> ssv;
+    let first = band - (8 >> ssv);
+    let stripe_of = |y: usize| -> (usize, usize) {
+        if y < first { (0, first.min(ch)) } else {
+            let s0 = first + (y - first) / band * band;
+            (s0, (s0 + band).min(ch))
+        }
+    };
+    let mut y0 = 0usize;
+    while y0 < ch {
+        if !crate::av2_recon::work_tick("av2_lr:chroma_stripe") { break; }
+        let (sy0, sy1) = stripe_of(y0);
+        debug_assert_eq!(sy0, y0);
+        // Chroma-plane accessor: standard LR stripe rule (interior = pre-LR src,
+        // out-of-stripe = the two saved post-deblock rows, replicated beyond).
+        let px = |x: i32, y: i32| -> i32 {
+            let xx = x.clamp(0, cw as i32 - 1) as usize;
+            if y < sy0 as i32 {
+                if sy0 == 0 { src[xx] } else { dblk[(y.max(sy0 as i32 - 2) as usize) * cw + xx] }
+            } else if y >= sy1 as i32 {
+                if sy1 >= ch { src[(ch - 1) * cw + xx] } else { dblk[(y.min(sy1 as i32 + 1) as usize) * cw + xx] }
+            } else {
+                src[y as usize * cw + xx]
+            }
+        };
+        // Luma accessor for the ds build, with this stripe's LUMA bounds and the
+        // virtual-lines rule (±2 rows deblock, then pre-LR interior, frame-edge clamp).
+        let sy0l = (sy0 << ssv).min(lh);
+        let sy1l = (sy1 << ssv).min(lh);
+        let pxl = |x: i32, y: i32| -> i32 {
+            let xx = x.clamp(0, lw as i32 - 1) as usize;
+            let yy = y.clamp(0, lh as i32 - 1);
+            if yy < sy0l as i32 {
+                if yy >= sy0l as i32 - 2 { dblk_l[yy as usize * lw + xx] } else { src_l[yy as usize * lw + xx] }
+            } else if yy >= sy1l as i32 {
+                if yy < sy1l as i32 + 2 && sy1l < lh { dblk_l[yy as usize * lw + xx] } else { src_l[yy as usize * lw + xx] }
+            } else {
+                src_l[yy as usize * lw + xx]
+            }
+        };
+        // Downsampled-luma accessor at chroma coords (avm calc_wienerns_ds_luma_420 /
+        // make_wienerns_ds_luma; ds_type = seq cfl_ds_filter_index, plain shifts, no rounding).
+        let dsl = |x: i32, y: i32| -> i32 {
+            let x = x.clamp(0, cw as i32 - 1);
+            let (lx, ly) = (x << ssh, y << ssv);
+            if ssh == 1 && ssv == 1 {
+                match ds_type {
+                    1 => (pxl(lx, ly) + pxl(lx, ly + 1)) >> 1,
+                    2 => pxl(lx, ly),
+                    _ => (pxl(lx, ly) + pxl(lx + 1, ly) + pxl(lx, ly + 1) + pxl(lx + 1, ly + 1)) >> 2,
+                }
+            } else {
+                pxl(lx, ly)
+            }
+        };
+        if p == 1 {
+            if let Ok(path) = std::env::var("MLRDS") {
+                use std::io::Write;
+                let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+                let mut rows: Vec<i32> = Vec::new();
+                if sy0 > 0 { rows.push(sy0 as i32 - 2); rows.push(sy0 as i32 - 1); }
+                for y in sy0..sy1 { rows.push(y as i32); }
+                if sy1 < ch { rows.push(sy1 as i32); rows.push(sy1 as i32 + 1); }
+                for y in rows {
+                    for x in 0..cw {
+                        let v = dsl(x as i32, y) as u16;
+                        f.write_all(&v.to_le_bytes()).unwrap();
+                    }
+                }
+            }
+        }
+        // Restoration-unit row for this stripe (dav lr_sbrow +8 convention, subsampled),
+        // with the last-unit absorb rule on both axes.
+        let row_y = if y0 == 0 { 0 } else { y0 + (8 >> ssv) };
+        let mut ay = row_y & !(unit_sz - 1);
+        if ay != 0 && ay + unit_sz / 2 > ch {
+            ay -= unit_sz;
+        }
+        let n_cols = 1usize.max((cw + unit_sz / 2) >> unit_sz_log2);
+        for k in 0..n_cols {
+            if !crate::av2_recon::work_tick("av2_lr:chroma_unit") { break; }
+            let x0 = k << unit_sz_log2;
+            let x1 = if k + 1 == n_cols { cw } else { (k + 1) << unit_sz_log2 };
+            let u_type = units.get(&(p as u8, x0, ay)).copied().unwrap_or(REST_NONE);
+            if u_type == REST_NONE {
+                continue;
+            }
+            if u_type != REST_NS {
+                crate::dlog!("[rav2d] WARNING: PC-Wiener chroma restoration unit is unverified (no oracle stream)");
+                continue;
+            }
+            let unit_f = if pd.ffon { None } else {
+                LR_UNIT_FILTERS.with(|u| u.borrow().get(&(p as u8, x0, ay)).map(|f| f[0]))
+            };
+            let filter: &[i8; 18] = match (&unit_f, pd.ffon) {
+                (Some(f), _) => f,
+                (None, true) => &pd.filter[0], // frame filters, chroma single-class
+                (None, false) => continue,     // NS unit with no decoded filters: nothing to apply
+            };
+            for y in sy0..sy1 {
+                for x in x0..x1 {
+                    let m = px(x as i32, y as i32);
+                    let mut s = m << 7;
+                    for (i, c) in WIENER_NS_CONFIG_UV.iter().enumerate() {
+                        let (dr, dc) = (c[0] as i32, c[1] as i32);
+                        let diff = px(x as i32 + dc, y as i32 + dr) + px(x as i32 - dc, y as i32 - dr) - 2 * m;
+                        s += diff * filter[i] as i32;
+                    }
+                    let lm = dsl(x as i32, y as i32);
+                    for (j, c) in WIENER_NS_CONFIG_UV_Y.iter().enumerate() {
+                        let (dr, dc) = (c[0] as i32, c[1] as i32);
+                        s += (dsl(x as i32 + dc, y as i32 + dr) - lm) * filter[6 + j] as i32;
+                    }
+                    dst[y * cw + x] = ((s + 64) >> 7).clamp(0, bdmax);
+                }
+            }
+        }
+        y0 = sy1;
+    }
+}
+
 // ===== Per-SB restoration-unit syntax (dav decode.c:4590 loop + read_restoration_info) =====
 
 /// Per-tile NS-Wiener filter bank (dav Dav2dTileState.ns_wiener_bank), luma+chroma.
@@ -399,6 +582,7 @@ pub fn lr_tile_init() {
         }
     });
     LR_UNITS.with(|u| u.borrow_mut().clear());
+    LR_UNIT_FILTERS.with(|u| u.borrow_mut().clear());
 }
 
 /// dav decode.c:4306 decode_4way: 2-bit adaptive bin + bypass remainder, recentered.
@@ -528,6 +712,16 @@ pub fn read_restoration_info(
 /// Per-SB restoration-unit loop (dav decode.c:4590), single tile. `bx_sb`/`by_sb` in 4px
 /// cells; `iw4`/`ih4` frame dims in cells; `ssh`/`ssv` chroma subsampling.
 #[allow(clippy::too_many_arguments)]
+/// Read the restoration-unit headers this SB owns, for planes `p_start..p_end`.
+///
+/// The plane range mirrors avm's per-tree schedule (decodeframe.c:2081,
+/// `get_partition_plane_start/end(xd->tree_type)`): an inter/SHARED tree reads
+/// ALL planes' units at the SB root (0..3), but an SDP key frame runs two tree
+/// passes per SB — the LUMA pass reads plane 0's units before the luma tree,
+/// then the CHROMA pass reads planes 1..3 before the chroma tree, AFTER the
+/// whole luma subtree has decoded. Reading all three up front desyncs the
+/// entropy stream on any key frame with chroma LR (the cpu3 real-photo repro).
+#[allow(clippy::too_many_arguments)]
 pub fn read_lr_units_sb(
     msac: &mut crate::msac::MsacContext,
     cdf: &mut crate::cdf_av2::CdfContext,
@@ -537,13 +731,15 @@ pub fn read_lr_units_sb(
     ih4: usize,
     ssh: usize,
     ssv: usize,
+    p_start: usize,
+    p_end: usize,
 ) {
     let cfg = LR_CFG.with(|c| c.borrow().clone());
     if !cfg.enabled() {
         return;
     }
     let sbsz = crate::av2_recon::sb_step4() * 4; // SB size in px
-    for p in 0..3usize {
+    for p in p_start..p_end {
         let frame_type = cfg.p[p].r_type;
         if frame_type == REST_NONE {
             continue;
@@ -569,6 +765,9 @@ pub fn read_lr_units_sb(
         let lruh = 1usize.max((th - fy + half).min(sbh) >> usz_log2);
         for y in 0..lruh {
             for x in 0..lruw {
+                if std::env::var("MLRU").is_ok() {
+                    crate::dlog!("[MLRUPRE] p={p} unit=({},{}) rng={} nscdf={}", fx + (x << usz_log2), fy + (y << usz_log2), msac.rng, cdf.m.rst_ns_wiener[0]);
+                }
                 let t = read_restoration_info(msac, cdf, p, frame_type);
                 if std::env::var("MLRU").is_ok() {
                     crate::dlog!("[MLRU] p={p} unit=({},{}) type={t} rng={}", fx + (x << usz_log2), fy + (y << usz_log2), msac.rng);
@@ -576,6 +775,15 @@ pub fn read_lr_units_sb(
                 LR_UNITS.with(|u| {
                     u.borrow_mut().insert((p as u8, fx + (x << usz_log2), fy + (y << usz_log2)), t);
                 });
+                if t == REST_NS && !cfg.p[p].ffon {
+                    let snap = NS_BANK.with(|b| b.borrow()[p].filter[4]);
+                    if p > 0 && std::env::var("MLRU").is_ok() {
+                        crate::dlog!("[MLRF] p={p} unit=({},{}) taps={:?}", fx + (x << usz_log2), fy + (y << usz_log2), &snap[0][..18]);
+                    }
+                    LR_UNIT_FILTERS.with(|u| {
+                        u.borrow_mut().insert((p as u8, fx + (x << usz_log2), fy + (y << usz_log2)), snap);
+                    });
+                }
             }
         }
     }
