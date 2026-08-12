@@ -1,0 +1,225 @@
+# Wiring audit — is everything we built reachable, and what isn't finished?
+
+**Date:** 2026-08-10, against `rusty_av2d` 0.2.3 + the C-tree removal.
+**Method:** compiler dead-code sweep (fresh `cargo build` warning harvest), caller
+search for every flagged item, public-API-vs-consumer cross-reference
+(`rff-codec-av2`, the CLI tools, the `capi` surface), a live multi-thread A/B, a
+sweep of every fail-closed gate, and a reconciliation of `corpus/pending/`
+against the promoted corpus.
+
+**Result in one line:** the decode path itself is fully wired — every `Settings`
+field is consumed, both CLI tools run, `--threads 4` is byte-identical to
+`--threads 1`, and the adapter/capi surfaces resolve. What the audit found
+instead: one **working capability sitting unpromoted** (now fixed), one **dead
+AV1-era parse layer** (~1,800 lines, zero callers), two **known-incomplete
+decode paths** (both fail loudly or are quarantined, neither silent), a **lost
+fuzz harness**, and an **undocumented probe surface**.
+
+---
+
+## 1. Fixed during this audit
+
+### 1.1 `v432_4f_sframe` decoded byte-identically but sat in `pending/`
+
+The wiring gap in its purest form: the capability existed, the gate never saw
+it. `pending/` also held **12 stale byte-identical duplicates** of clips that
+had already been promoted, obscuring what was actually pending.
+
+**Done:** promoted → corpus (now **48 clips**, gate re-run green), duplicates
+deleted. `pending/` now holds exactly its two documented cases.
+
+---
+
+## 2. Dead code that should be excised (the "C tree" pattern, in Rust)
+
+### 2.1 The AV1-era frame-header parse layer — ~1,800 lines, zero callers
+
+The live AV2 path is `parse_av2_frame_hdr_front` (`src/obu.rs:253`, the `F2HDR`
+trace). The rav1d-inherited AV1 parser beneath it is compiler-proven dead:
+
+| item | site |
+|---|---|
+| `parse_frame_hdr` | `obu.rs:3623` |
+| `parse_frame_size` | `obu.rs:2453` |
+| `parse_refidx` | `obu.rs:2559` |
+| `parse_tiling` | `obu.rs:2693` |
+| `parse_quant` | `obu.rs:2814` |
+| `parse_seg_data` / `parse_segmentation` | `obu.rs:2904` / `2980` |
+| `parse_delta` | `obu.rs:3063` |
+| `parse_loopfilter` | `obu.rs:3100` |
+| `parse_cdef` | `obu.rs:3183` |
+| `parse_restoration` | `obu.rs:3220` |
+| `parse_skip_mode` | `obu.rs:3283` |
+| `parse_gmv` | `obu.rs:3385` |
+| `parse_film_grain_data` / `parse_film_grain` | `obu.rs:3456` / `3565` |
+| `parse_tile_hdr` / `parse_tile_grp` | `obu.rs:3985` / `4267` |
+| `DEFAULT_MODE_REF_DELTAS` | `obu.rs:2554` |
+| `get_bits_subexp{,_u}` (only the dead `parse_gmv` wanted them) | `getbits.rs:146` |
+| `rav1d_msac_decode_bool_equi_rust` (dispatcher-collapse leftover) | `msac.rs:290` |
+
+**How to implement the removal properly** (the discipline that worked for the C
+tree and the assembly):
+
+1. Delete the functions in one commit, nothing else in it.
+2. `cargo build --release` — the compiler finds any accomplice code (types,
+   helpers) that only they used; delete that too.
+3. Gate: corpus 48/48 (`ORACLE=avmdec AVMDEC=… bash bench/conformance/run.sh`)
+   + `cargo test --release` (112), **after a fresh build** — `run.sh` does not
+   build, and a stale `target/release/dav1d.exe` has produced a false PASS
+   before.
+4. No crates.io release needed unless the packaged file list changes
+   (`cargo package -p rusty_av2d --list` before/after must be identical —
+   it will be, this is all inside `src/obu.rs` etc., so a release IS needed;
+   treat it as 0.2.4 with "no functional change").
+
+Do **not** delete `parse_seq_hdr` (`obu.rs:1521`) — it is the live sequence
+parser for both AV1-shaped and AV2 fields.
+
+### 2.2 "Value assigned is never read" warnings — audit, don't bulk-fix
+
+`hr_avg` (×4, `av2_coef.rs:459/643/873/1016`), `idx`
+(`av2_recon.rs:1494/1687`), and the `luma_pred`/`fmv`/`warp_pred` trio
+(`av2_recon.rs:4204-4206`). The trio is benign — hoisted declarations
+immediately overwritten by `decode_b_inter` (verified by reading the site). The
+`hr_avg` four are worth one deliberate look while touching `av2_coef.rs`: an
+assigned-then-overwritten value in a coefficient parser is the shape a
+higher-range-average bug would take. Verdict belongs in the commit that
+resolves the warning, whichever way it goes.
+
+---
+
+## 3. Known-incomplete decode paths (none silent — that is the invariant)
+
+Every incomplete path either **refuses loudly** or is **quarantined with a
+repro**. The one silent-wrong-output bug found this cycle (SDP chroma
+inheritance) was fixed in 0.2.3 and its clip promoted; these are what remain.
+
+### 3.1 Single-picture-header streams — refused, parse not bit-exact
+
+`obu.rs:293` returns `UnsupportedBitstream` unless
+`RUSTY_AV2D_ALLOW_SINGLE_PICTURE_HEADER=1`. Repro:
+`pending/v432_still_reduced.ivf`.
+
+**Plan:** enumerate the ~22 fields avm gates on `single_picture_header_flag`
+(`grep -n single_picture_header_flag av2/decoder/decodeframe.c`, read the line
+after each), mirror them in `parse_av2_frame_hdr_front`, tiling first — the
+known first divergence is `tiling0` consuming 14 bits where the full-header
+form consumes 3 (`log2c=3 log2r=2` on a single-tile frame). Gate: the pending
+clip decodes byte-identical → promote it, drop the env gate, and lift the
+matching writer restriction in `rusty_av2f` (`encode()` currently refuses the
+compact form *because* of this gap).
+
+### 3.2 `v320x480_still_cpu3` — silently wrong (quarantined), pre-tree divergence
+
+The one remaining wrong-pixels repro (99.5% of bytes), same photo as the fixed
+qp128 case but `--cpu-used=3 --qp=110`. Already localized: the per-SB state
+diverges at the **first** SB, and the first partition node's **entry** `rng`
+already differs (avm 36096 / ours 59072; post-init is 32768) — both decoders
+read symbols *before* the partition tree and read different ones.
+
+**Plan:** the bug is upstream of the tree — per-SB loop-restoration units
+(`read_lr_units_sb`), CDEF index, or delta-q, or the frame header. Use the
+probes shipped in 0.2.3: `PARTIN=1` on ours (`[PARTIN]`/`[PARTINC]` with `rng`
+**and** `dif`), `PARTPROBE=1` on avm — remembering avm suppresses `[PARTIN]`
+for derived/forced partitions, so align as a subsequence, never line-diff.
+Full instructions sit next to the clip in `pending/README.md`.
+
+### 3.3 Fail-closed by design (correct wiring, listed for completeness)
+
+- **User-defined quantization matrices** (QM OBU, type 22): parsed, then a loud
+  `Err` — avmenc cannot mint one, so there is no oracle to verify against.
+- **`morph=1` recon** is unexercised by any mintable stream; the code path
+  exists but has never been oracle-checked.
+- **OBU_CONTENT_INTERPRETATION (24)** is skipped with a warning — verified
+  harmless (identical output with and without it in the stream).
+
+---
+
+## 4. Infrastructure gaps
+
+### 4.1 The fuzz harness is not in the tree — it is lost
+
+The harness that drove the corrupt-stream crash rate 39%→~1% (`fuzz.py`, 7
+rounds, then a 750-case campaign) lived in a session scratchpad and was never
+committed. The *fixes* it produced are in the tree; the *instrument* is gone.
+
+**Plan:** recreate as `bench/fuzz/fuzz.py` — both distributions matter and
+found disjoint bugs: (a) corpus-clip byte mutation, (b) fully random bytes
+(the tile-size underflow was found by (b) after (a) ran clean). Wire a smoke
+tier (~200 cases) into CI or the conformance script behind `FUZZ=1`. The known
+remaining tail: ~1,756 index ops + ~30 unwrap/panic + 28 asserts in the decode
+path; real closure is structural (checked accessors + `deny(indexing_slicing)`,
+already started for `av2_obu`/`av2_qm` per the README) — fuzzing samples the
+tail, it does not prove it empty.
+
+### 4.2 The probe surface is real API and 99% undocumented
+
+121 distinct env vars gate debug probes in `src/` (`PARTIN`, `MSBT`, `SBI`,
+`F157DBG`, `MVDBG`, `DAVCAP`/`DAVCAP_DIR`, `ISOLATE`, …). Only
+`RUSTY_AV2D_DEBUG` is documented. These are the decoder's regression
+instrument — the qp128 root-cause took ~an hour *because* `MSBT`/`PARTIN`
+existed — but they are undiscoverable.
+
+**Plan:** a generated `docs/probes.md`: one table row per var — name, what it
+prints, which avm probe it pairs with (`[MSBT]`⇔`[SBTELL]`,
+`[PARTIN]`⇔`PARTPROBE`, `DAVCAP`⇔dav capture files). A ~20-line script can
+harvest the list (`grep -o 'env::var("[A-Z0-9_]*")'`) so the doc can be
+re-generated and diffed in CI rather than hand-maintained. Do **not** remove
+probes to quiet the count — the bring-up discipline keeps them until the
+decoder is fully conformant.
+
+### 4.3 `capi` exposes 20 `dav1d_*` symbols but ships no C header
+
+`crate-type = ["staticlib", "rlib"]` with 20 `#[no_mangle]` functions behind
+the default-on `capi` feature — but the dav1d C headers were (correctly)
+deleted with the C tree, so a C consumer has symbols and no declarations.
+
+**Plan:** either (a) generate `include/rusty_av2d.h` with **cbindgen** from the
+actual ABI — never restore the hand-maintained AV1-era headers, they describe a
+different codec's structs — or (b) decide there is no C consumer and flip
+`capi` off by default, keeping the CLI on the Rust API. (a) is a small
+`build.rs`-optional step; (b) is a semver-visible default change, so it wants
+the next minor. Either resolves the half-wired state; today's is the only
+wrong one.
+
+### 4.4 Corpus breadth ≠ content breadth
+
+The 48-clip corpus is avmenc-flag-permutation synthetic except the one promoted
+photograph — and that photograph immediately exposed a tool combination
+(shared-luma `HORZ_3` chroma inheritance) that 47 synthetic clips never elected,
+plus the still-open cpu3 case. **Plan:** mint a small real-content wing —
+photo/screen/video-frame sources × {cpu-used 3, 5, 8} × 3-4 qps — and promote
+whatever passes; whatever fails is the next bug, pre-localized by construction.
+
+---
+
+## 5. Verified wired (checked, no action)
+
+| surface | check |
+|---|---|
+| `Decoder`/`Picture` Rust API | consumed by `rff-codec-av2`; every `Settings` field read by the decode path (grep-verified per field) |
+| CLI `dav1d.exe` | builds, drives the 48-clip gate |
+| `seek_stress.exe` | builds, runs clean on a corpus clip (exit 0) |
+| Multi-threading | `--threads 4` byte-identical to `--threads 1` (tip2 clip) |
+| `capi` symbols | 20 `#[no_mangle]` fns, all `#[cfg(feature = "capi")]`-gated, feature default-on (header gap → §4.3) |
+| Probe additions from 0.2.3 | `PARTIN`/`PARTINC` fire on key frames (used live in the qp128 root-cause) |
+| Crate packaging | `exclude`-free manifest packages the identical 168-file list |
+| Downstream | `remade_ffmpeg_rs` resolves registry `rusty_av2d 0.2.3`; its AV2/AV2F gates green |
+
+Out of scope for this repo but found on the way: `remade_ffmpeg_rs` has
+`rff-format-hls` built and never registered in `rff/src/lib.rs` (every other
+format and codec crate is), and no AV2 *encoder* is wired (`rav2e` exists,
+standalone) — both belong to that repo's own wiring list.
+
+---
+
+## Suggested order
+
+1. **§2.1** — delete the dead AV1 parse layer (one commit, gate, 0.2.4).
+2. **§4.1** — recreate the fuzz harness in-tree (it guards everything else).
+3. **§3.2** — root-cause the cpu3 clip (the probes are ready; this is the only
+   wrong-pixels path left).
+4. **§3.1** — finish the single-picture-header parse (unlocks the compact form
+   in `rusty_av2f` too).
+5. **§4.3** — cbindgen or de-default `capi`.
+6. **§4.2 / §4.4** — probes doc + real-content corpus wing, as ongoing hygiene.
