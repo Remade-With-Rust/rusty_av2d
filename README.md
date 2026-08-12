@@ -4,7 +4,7 @@
 
 `rusty_av2d` decodes [AV2](https://aomedia.org/) — the successor to AV1 currently
 being developed by the Alliance for Open Media — and produces output that is
-**byte-identical to the AVM reference decoder** across a 55-clip conformance
+**byte-identical to the AVM reference decoder** across a 57-clip conformance
 corpus covering every major tool in the format.
 
 [![crates.io](https://img.shields.io/crates/v/rusty_av2d.svg)](https://crates.io/crates/rusty_av2d)
@@ -30,7 +30,7 @@ build is red.
 
 ## What "byte-identical" means here
 
-55 clips, each decoded and compared byte-for-byte against AOM's `avmdec`
+57 clips, each decoded and compared byte-for-byte against AOM's `avmdec`
 (and against `dav2d` where it supports the stream). Any mismatch fails the
 gate. Alongside them run 112 unit and integration tests. Both must pass before
 any change lands.

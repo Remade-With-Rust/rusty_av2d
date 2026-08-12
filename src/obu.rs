@@ -280,18 +280,6 @@ fn parse_av2_frame_hdr_front(
     // reduced case must FALL THROUGH into it rather than be branched around — branching
     // around it returned (yac=0, frame_type=0) and decoded every still picture to flat grey,
     // silently.
-    // KNOWN LIMITATION: a single-picture-header stream parses through the header now (the
-    // outer branch used to skip it entirely, silently decoding every still picture to flat
-    // grey), but the parse is not yet bit-exact -- the tile-info/seq-header interaction still
-    // diverges, and avm gates ~22 fields on this flag of which we mirror only some. Refuse the
-    // stream rather than emit wrong pixels silently; that silence was the actual defect.
-    // RUSTY_AV2D_ALLOW_SINGLE_PICTURE_HEADER=1 opts in for development on the remaining work.
-    if seq_hdr.reduced_still_picture_header != 0
-        && std::env::var("RUSTY_AV2D_ALLOW_SINGLE_PICTURE_HEADER").is_err()
-    {
-        crate::dlog!("[rav2d AV2 framehdr] single-picture-header stream: parse incomplete, refusing");
-        return Err(Rav1dError::UnsupportedBitstream);
-    }
     let frame_type = if seq_hdr.reduced_still_picture_header != 0 {
         0
     } else {
@@ -342,7 +330,14 @@ fn parse_av2_frame_hdr_front(
         }
         let mut show_immediate = 0u32;
         let mut show_implicit = 0u32;
-        if obu_type != Bridge {
+        if seq_hdr.reduced_still_picture_header != 0 {
+            // Single-picture header: avm FORCES immediate_output_picture=1 and
+            // implicit_output_picture=0 with NO bits coded (decodeframe.c SPH block).
+            // Reading the immediate bit here shifted every later frame-header field
+            // by one — the "tiling0 consumes 14 bits / 8x4 tile grid" signature was
+            // this single bit's fallout, not a tiling bug.
+            show_immediate = 1;
+        } else if obu_type != Bridge {
             if obu_type != OpenLoopKf {
                 show_immediate = gb.get_bit() as u32;
             }
