@@ -287,18 +287,6 @@ fn ctx_norm(s: &mut MsacContext, dif: EcWin, rng: c_uint) {
     }
 }
 
-fn rav1d_msac_decode_bool_equi_rust(s: &mut MsacContext) -> bool {
-    let r = s.rng;
-    let mut dif = s.dif;
-    assert!(dif >> (EC_WIN_SIZE - 16) < r as EcWin);
-    let mut v = (r >> 8 << 7) + EC_MIN_PROB;
-    let vw = (v as EcWin) << (EC_WIN_SIZE - 16);
-    let ret = dif >= vw;
-    dif -= (ret as EcWin) * vw;
-    v = v.wrapping_add((ret as c_uint) * (r.wrapping_sub(2 * v)));
-    ctx_norm(s, dif, v);
-    !ret
-}
 
 fn rav1d_msac_decode_bool_rust(s: &mut MsacContext, f: c_uint) -> bool {
     let r = s.rng;

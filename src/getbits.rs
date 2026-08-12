@@ -143,32 +143,7 @@ impl<'a> GetBits<'a> {
         (1 << n_bits) - 1 + self.get_bits(n_bits)
     }
 
-    fn get_bits_subexp_u(&mut self, r#ref: c_uint, n: c_uint) -> c_uint {
-        let mut v = 0 as c_uint;
-        let mut i = 0;
-        loop {
-            let b = if i != 0 { 3 + i - 1 } else { 3 };
-            if n < v + (3 * (1 << b)) {
-                v += self.get_uniform(n - v + 1);
-                break;
-            } else if !self.get_bit() {
-                v += self.get_bits(b);
-                break;
-            } else {
-                v += 1 << b;
-                i += 1;
-            }
-        }
-        if r#ref * 2 <= n {
-            inv_recenter(r#ref, v)
-        } else {
-            n - inv_recenter(n - r#ref, v)
-        }
-    }
 
-    pub fn get_bits_subexp(&mut self, r#ref: c_int, n: c_uint) -> c_int {
-        self.get_bits_subexp_u((r#ref + (1 << n)) as c_uint, 2 << n) as c_int - (1 << n)
-    }
 
     // Discard bits from the buffer until we're next byte-aligned.
     #[inline]
