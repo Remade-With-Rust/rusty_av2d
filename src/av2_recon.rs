@@ -2247,7 +2247,7 @@ fn decode_b_key_yuv(
         let ubw4 = if fw4 > ubx4 { (1usize << uslw).min(fw4 - ubx4) } else { 1usize << uslw };
         let ubh4 = if fh4 > uby4 { (1usize << uslh).min(fh4 - uby4) } else { 1usize << uslh };
         recon_intra_luma(
-            ubx4, uby4, *uslw, *uslh, ubw4, ubh4, info.y_mode_idx, info.midx, info.mrl_index,
+            ubx4, uby4, (bx4, by4), *uslw, *uslh, ubw4, ubh4, info.y_mode_idx, info.midx, info.mrl_index,
             info.multi_mrl != 0, cf, *u_txtp, *u_stxt, *u_stxs, *u_az, info.fsc,
             have_left || *ux > 0, have_top || *uy > 0,
             tx_part >= 6 && (*ux > 0 || *uy > 0),
@@ -5403,7 +5403,7 @@ pub fn decode_leaf(
             let ubw4 = if fw4 > ubx4 { (1usize << uslw).min(fw4 - ubx4) } else { 1usize << uslw };
             let ubh4 = if fh4 > uby4 { (1usize << uslh).min(fh4 - uby4) } else { 1usize << uslh };
             recon_intra_luma(
-                ubx4, uby4, *uslw, *uslh, ubw4, ubh4, info.y_mode_idx, info.midx, info.mrl_index,
+                ubx4, uby4, (bx4, by4), *uslw, *uslh, ubw4, ubh4, info.y_mode_idx, info.midx, info.mrl_index,
                 info.multi_mrl != 0, cf, *u_txtp, *u_stxt, *u_stxs, *u_az, info.fsc,
                 have_left || *ux > 0, have_top || *uy > 0,
                 tx_part >= 6 && (*ux > 0 || *uy > 0),
@@ -6160,6 +6160,9 @@ fn recon_dir_idif(
         lbuf[i] = left[n - 1];
     }
 
+    if std::env::var("MIE2").is_ok() && p == 70 && w == 4 && h == 8 && !chroma {
+        crate::dlog!("[MIE2RAW] sm_sep={sm_separate} asm={} lsm={} ab={:?} le={:?}", above_sm as u8, left_sm as u8, &abuf[AO - 1..AO + 13], &lbuf[AO - 1..AO + 13]);
+    }
     // avm edge filtering (skipped for p==90/180; only if seq edge filter enabled).
     if ef && p != 90 && p != 180 {
         let ab_le = usize::from(need_above_left);
@@ -6195,7 +6198,16 @@ fn recon_dir_idif(
     if crate::av2_ipred::DIR_DBG.with(|c| c.get()) {
         crate::dlog!("[MDIRD] p={p} ef={ef} chroma={chroma} apply_ibp={apply_ibp} sm_sep={sm_separate} lbuf_postfilt={:?}", &lbuf[AO - 1..(AO + (w + h)).min(lbuf.len())]);
     }
+    let mie2 = std::env::var("MIE2").is_ok() && p == 70 && w == 4 && h == 8 && !chroma;
+    if mie2 {
+        crate::dlog!("[MIE2] pang={p} ab={:?} le={:?}", &abuf[AO - 1..AO + 13], &lbuf[AO - 1..AO + 13]);
+    }
     project_idif(pred, w, h, &mut abuf, &mut lbuf, AO, p, mrl, chroma, bdmax);
+    if mie2 {
+        for r in 0..h {
+            crate::dlog!("[MIE2DR] r={r}: {:?}", &pred[r * w..r * w + w]);
+        }
+    }
     // Directional IBP blend (z1/z3, tx != 4x4, even angle-delta, mrl=0, LUMA ONLY —
     // avm reconintra.c gates the blend on plane == PLANE_TYPE_Y; chroma still uses the
     // unrestricted apply_ibp for the NEED flags / corner filter / edge-filter angles).
@@ -6437,6 +6449,12 @@ fn mscref_check(bx4: usize, by4: usize, w: usize, h: usize, tag: &str) {
 fn recon_intra_luma(
     bx4: usize,
     by4: usize,
+    // The BLOCK origin (not the TX unit's): avm's edge-filter smooth flags read
+    // xd->above_mbmi / xd->left_mbmi, which are the BLOCK's neighbours, constant
+    // across the block's TX units. Computing them from the unit coords hands an
+    // off-origin unit its sibling unit (or a different row's block) as "neighbour"
+    // and flips the edge-filter strength (the cpu3 D67 8x16 repro).
+    blk_org: (usize, usize),
     slw: usize,
     slh: usize,
     bw4: usize,
@@ -6566,8 +6584,8 @@ fn recon_intra_luma(
         } else {
             (0, 0)
         };
-        let above_sm = f.smooth_at(bx4 as i32, by4 as i32 - 1);
-        let left_sm = f.smooth_at(bx4 as i32 - 1, by4 as i32);
+        let above_sm = f.smooth_at(blk_org.0 as i32, blk_org.1 as i32 - 1);
+        let left_sm = f.smooth_at(blk_org.0 as i32 - 1, blk_org.1 as i32);
         if std::env::var("MDCP").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 }) {
             let tr: Vec<i32> = (0..8).map(|i| f.pl[0].at(bx4 * 4 + i, by4 * 4 - 1)).collect();
             let lc: Vec<i32> = (0..8).map(|i| f.pl[0].at(bx4 * 4 - 1, by4 * 4 + i)).collect();
@@ -9938,7 +9956,7 @@ pub fn decode_b_luma(
             // recon through the frame buffer (dav predicts per TX block).
             let (uhl, uht) = (have_left || ux > 0, have_top || uy > 0);
             recon_intra_luma(
-                ubx4, uby4, slw, slh, ubw4, ubh4, y_mode_idx, midx, mrl_index, multi_mrl != 0,
+                ubx4, uby4, (bx4, by4), slw, slh, ubw4, ubh4, y_mode_idx, midx, mrl_index, multi_mrl != 0,
                 &cf, blk_txtp, blk_stxt, blk_stxs, all_zero, fsc, uhl, uht,
                 tx_part >= 6 && (ux > 0 || uy > 0),
                 palette.as_ref().map(|p| (p, ux * 4, uy * 4)),

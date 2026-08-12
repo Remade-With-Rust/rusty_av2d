@@ -449,13 +449,20 @@ pub fn lr_filter_chroma(
         // virtual-lines rule (±2 rows deblock, then pre-LR interior, frame-edge clamp).
         let sy0l = (sy0 << ssv).min(lh);
         let sy1l = (sy1 << ssv).min(lh);
+        // Same out-of-stripe rule as the luma filter's own accessor: avm's
+        // setup_processing_stripe_boundary replaces RESTORATION_BORDER_VERT=4 rows
+        // on each side, built from the 2 saved post-deblock rows with the OUTERMOST
+        // saved row duplicated outward (src_row = max(i+2,0) above / min below). A
+        // clamp into the two dblk rows reproduces that exactly; falling back to
+        // pre-LR src beyond +-2 does not (the outer ds border rows were the last
+        // 125 differing bytes of the cpu3 repro).
         let pxl = |x: i32, y: i32| -> i32 {
             let xx = x.clamp(0, lw as i32 - 1) as usize;
             let yy = y.clamp(0, lh as i32 - 1);
             if yy < sy0l as i32 {
-                if yy >= sy0l as i32 - 2 { dblk_l[yy as usize * lw + xx] } else { src_l[yy as usize * lw + xx] }
-            } else if yy >= sy1l as i32 {
-                if yy < sy1l as i32 + 2 && sy1l < lh { dblk_l[yy as usize * lw + xx] } else { src_l[yy as usize * lw + xx] }
+                if sy0l == 0 { src_l[xx] } else { dblk_l[(yy.max(sy0l as i32 - 2) as usize) * lw + xx] }
+            } else if yy >= sy1l as i32 && sy1l < lh {
+                dblk_l[(yy.min(sy1l as i32 + 1) as usize) * lw + xx]
             } else {
                 src_l[yy as usize * lw + xx]
             }
@@ -463,7 +470,12 @@ pub fn lr_filter_chroma(
         // Downsampled-luma accessor at chroma coords (avm calc_wienerns_ds_luma_420 /
         // make_wienerns_ds_luma; ds_type = seq cfl_ds_filter_index, plain shifts, no rounding).
         let dsl = |x: i32, y: i32| -> i32 {
+            // Clamp in CHROMA space: avm extends the ds buffer by replicating its
+            // outermost ROWS/cols, so an off-frame tap reads the replicated ds row
+            // (built from the last TWO luma rows) — clamping the luma rows instead
+            // would average the final luma row with itself.
             let x = x.clamp(0, cw as i32 - 1);
+            let y = y.clamp(0, ch as i32 - 1);
             let (lx, ly) = (x << ssh, y << ssv);
             if ssh == 1 && ssv == 1 {
                 match ds_type {
