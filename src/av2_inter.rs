@@ -153,7 +153,7 @@ fn mc_core(
                 if interior {
                     for yy in 0..midh {
                         let base = ((dy - 3 + yy as i32) as usize) * stride + (dx - 3) as usize;
-                        crate::simd::fir8_row(
+                        crate::simd::fir8_row_u16(
                             &px[base..base + w + 7],
                             fh,
                             &mut mid[yy * w..yy * w + w],
@@ -195,7 +195,7 @@ fn mc_core(
                 let clamp = if prep { -1 } else { bdmax };
                 for yy in 0..h {
                     let base = ((dy + yy as i32) as usize) * stride + (dx - 3) as usize;
-                    crate::simd::fir8_row(
+                    crate::simd::fir8_row_u16(
                         &px[base..base + w + 7],
                         fh,
                         &mut dst[yy * dst_w..yy * dst_w + w],
@@ -224,7 +224,7 @@ fn mc_core(
                 let clamp = if prep { -1 } else { bdmax };
                 for yy in 0..h {
                     let base = ((dy - 3 + yy as i32) as usize) * stride + dx as usize;
-                    crate::simd::fir8_col(
+                    crate::simd::fir8_col_u16(
                         &px[base..base + 7 * stride + w],
                         stride,
                         fv,
@@ -254,10 +254,12 @@ fn mc_core(
                     let drow = &mut dst[yy * dst_w..yy * dst_w + w];
                     if prep {
                         for (xx, d) in drow.iter_mut().enumerate() {
-                            *d = px[base + xx] << IB;
+                            *d = (px[base + xx] as i32) << IB;
                         }
                     } else {
-                        drow[..w].copy_from_slice(&px[base..base + w]);
+                        for (d, &v) in drow[..w].iter_mut().zip(&px[base..base + w]) {
+                            *d = v as i32;
+                        }
                     }
                 }
             } else {
@@ -739,7 +741,7 @@ mod tests {
         let mut rf = Plane::alloc(w, h);
         for i in 0..w * h {
             if !crate::av2_recon::work_tick("av2_inter:672") { break; }
-            rf.px[i] = bytes[i] as i32;
+            rf.px[i] = bytes[i] as u16;
         }
         // (bx, by, w, h, mvy, mvx, filter, expected first 8 pred pixels)
         let cases: &[(usize, usize, usize, usize, i32, i32, usize, [i32; 8])] = &[
@@ -762,7 +764,7 @@ mod tests {
             let mut cu = Plane::alloc(cw_, ch_);
             for i in 0..cw_ * ch_ {
                 if !crate::av2_recon::work_tick("av2_inter:694") { break; }
-                cu.px[i] = bytes[w * h + i] as i32;
+                cu.px[i] = bytes[w * h + i] as u16;
             }
             // (cpx, cpy, cw, ch, mvy, mvx, expected first row)
             let ccases: &[(usize, usize, usize, usize, i32, i32, [i32; 4])] = &[

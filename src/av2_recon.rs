@@ -1060,7 +1060,7 @@ pub fn tip_recon_sb(bx4: usize, by4: usize, iw4: usize, ih4: usize) {
     let (bw4, bh4) = (sb_step4(), sb_step4());
     let (w4c, h4c) = (bw4.min(iw4.saturating_sub(bx4)), bh4.min(ih4.saturating_sub(by4)));
     let (w, h) = (bw4 * 4, bh4 * 4);
-    let mut luma_pred = vec![0i32; w * h];
+    let mut luma_pred = crate::scratch::zeroed(w * h);
     let _ = tip_pred_luma(&mut luma_pred, bx4, by4, bw4, bh4, w4c, h4c, fmv, filter, iw4, ih4);
     crate::av2_frame::FRAME.with(|fr| {
         let mut f = fr.borrow_mut();
@@ -1075,10 +1075,9 @@ pub fn tip_recon_sb(bx4: usize, by4: usize, iw4: usize, ih4: usize) {
         for yy in 0..hc {
             let dst = (by4 * 4 + yy) * stride + bx4 * 4;
             for xx in 0..wc {
-                f.pl[0].px[dst + xx] = luma_pred[yy * w + xx].clamp(0, bdmax_g());
+                f.pl[0].px[dst + xx] = luma_pred[yy * w + xx].clamp(0, bdmax_g()) as u16;
             }
         }
-        crate::av2_frame::write_recon_pad(0, bx4 * 4, by4 * 4, &luma_pred, w, h);
         mscore_luma("inter", bx4 * 4, by4 * 4, w, h, &luma_pred, w);
         f.mark_coded(bx4, by4, bw4, bh4, 0);
     });
@@ -3521,7 +3520,7 @@ fn recon_inter_chroma(
                     const DAV2MINE: [usize; 8] = [0, 3, 1, 2, 4, 5, 6, 7];
                     let (row_ty, col_ty) = (DAV2MINE[(txtp & 7) as usize], DAV2MINE[((txtp >> 5) & 7) as usize]);
                     let iqm = crate::av2_qm::iqm_slice(pl + 1, tw, th, row_ty != 3 && col_ty != 3);
-                    let mut coeff = vec![0i32; n];
+                    let mut coeff = crate::scratch::zeroed(n);
                     for i in 0..n.min(cf.len()) {
                         let lvl = cf[i];
                         if lvl != 0 {
@@ -3532,7 +3531,7 @@ fn recon_inter_chroma(
                             coeff[i] = if lvl < 0 { -mag } else { mag };
                         }
                     }
-                    let mut residual = vec![0i32; n];
+                    let mut residual = crate::scratch::zeroed(n);
                     crate::av2_itx::inv_txfm_2d(&coeff, slw, slh, row_ty, col_ty, &mut residual);
                     if std::env::var("CQD").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == cpx && p[1] == cpy }) {
                         crate::dlog!("[CQD] pl={pl} tw={tw} th={th} coeff_nz={:?} resid_r0={:?} resid_r1={:?} pred_r0={:?}",
@@ -3576,10 +3575,9 @@ fn recon_inter_chroma(
                             if !work_tick("chroma:3509") { break; }
                             let d = (cpy + yy) * cstride + cpx;
                             for xx in 0..wc {
-                                f.pl[pl + 1].px[d + xx] = buf[yy * cw + xx].clamp(0, bdmax_g());
+                                f.pl[pl + 1].px[d + xx] = buf[yy * cw + xx].clamp(0, bdmax_g()) as u16;
                             }
                         }
-                        crate::av2_frame::write_recon_pad(pl + 1, cpx, cpy, &buf, cw, ch);
                         mscore_chroma(pl + 1, cpx, cpy, cw, ch, &buf);
                     }
                 });
@@ -3947,7 +3945,7 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
         // QM weighting (2D transforms only; txtp0 is mine-packed, per-axis IDENTITY == 1).
         let is_2d = ((txtp0 & 7) & 3) != 1 && (((txtp0 >> 5) & 7) & 3) != 1;
         let iqm = crate::av2_qm::iqm_slice(plane, tw, th, is_2d);
-        let mut coeff = vec![0i32; n];
+        let mut coeff = crate::scratch::zeroed(n);
         for i in 0..n.min(cf.len()) {
             let lvl = cf[i];
             if lvl != 0 {
@@ -4011,7 +4009,7 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
         if !luma_only { f.mark_coded_c_avail(bx4, by4, bw4, bh4); }
         // (edge blocks spilling past the frame are still reconstructed — the writes below clip.)
         // LUMA: block-copy from FRAME at bv + residual.
-        let mut pred = vec![0i32; w * h];
+        let mut pred = crate::scratch::zeroed(w * h);
         // BILINEAR (5) — dav2d recon_tmpl.c:3212 uses DAV2D_FILTER_BILINEAR for the intrabc
         // block-copy subpel (a qpel BV interpolates with the 2-tap filter, not the 8-tap).
         crate::av2_inter::mc_translate_luma(&f.pl[0], &mut pred, w, bx4 * 4, by4 * 4, w, h, bv.0, bv.1, 5, bdmax_g());
@@ -4052,10 +4050,9 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
         for yy in 0..hc {
             let d = (by4 * 4 + yy) * ls + bx4 * 4;
             for xx in 0..wc {
-                f.pl[0].px[d + xx] = pred[yy * w + xx].clamp(0, bdmax_g());
+                f.pl[0].px[d + xx] = pred[yy * w + xx].clamp(0, bdmax_g()) as u16;
             }
         }
-        crate::av2_frame::write_recon_pad(0, bx4 * 4, by4 * 4, &pred, w, h);
         mscore_luma("intrabc", bx4 * 4, by4 * 4, w, h, &pred, w);
         f.mark_coded(bx4, by4, bw4, bh4, 0);
         // TX-partitioned block: per-UNIT deblock tx levels + unit-boundary edges (avm
@@ -4080,7 +4077,7 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
             if f.pl[pl + 1].w == 0 {
                 continue;
             }
-            let mut cpred = vec![0i32; cw * ch];
+            let mut cpred = crate::scratch::zeroed(cw * ch);
             // dav2d intrabc chroma block-copy uses the BILINEAR subpel filter (recon_tmpl.c:3649
             // `DAV2D_FILTER_BILINEAR`), NOT the 8-tap. Chroma BVs are half-pel when the luma BV is an
             // odd pixel count; the wrong filter gave a ±2 error on every subpel intrabc chroma block.
@@ -4097,10 +4094,9 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
             for yy in 0..hc {
                 let d = (cpy + yy) * cs + cpx;
                 for xx in 0..wc {
-                    f.pl[pl + 1].px[d + xx] = cpred[yy * cw + xx].clamp(0, bdmax_g());
+                    f.pl[pl + 1].px[d + xx] = cpred[yy * cw + xx].clamp(0, bdmax_g()) as u16;
                 }
             }
-            crate::av2_frame::write_recon_pad(pl + 1, cpx, cpy, &cpred, cw, ch);
         }
         // Record the intrabc block's CHROMA deblock edges. dav's create_db_mask marks EVERY
         // block with `b->intra` (intrabc has intra=1), but recon_intrabc's chroma block-copy never
@@ -4419,7 +4415,7 @@ pub fn decode_leaf(
                     REF_F2PRED.with(|rp| {
                         if let (Some(r0), Some(pr)) = (rf.borrow()[0].as_ref(), rp.borrow().as_ref()) {
                             let (w, h) = (bw4 * 4, bh4 * 4);
-                            let mut pred = vec![0i32; w * h];
+                            let mut pred = crate::scratch::zeroed(w * h);
                             crate::av2_inter::mc_translate_luma(r0, &mut pred, w, bx4 * 4, by4 * 4, w, h, fmv.y, fmv.x, info.filter as usize, bdmax_g());
                             let mut ok = true;
                             'sc: for yy in 0..h {
@@ -4455,7 +4451,7 @@ pub fn decode_leaf(
                         let (mut oku, mut okv) = (false, false);
                         for pl in 0..2 {
                             if let (Some(r), Some(pr)) = (rfb[pl + 1].as_ref(), rpb[pl].as_ref()) {
-                                let mut pred = vec![0i32; cw * ch];
+                                let mut pred = crate::scratch::zeroed(cw * ch);
                                 crate::av2_inter::mc_translate(r, &mut pred, cw, cpx, cpy, cw, ch, fmv.y, fmv.x, info.filter as usize, ss_g().0 as u32, ss_g().1 as u32, bdmax_g());
                                 let mut ok = true;
                                 'cc: for yy in 0..ch {
@@ -4530,7 +4526,7 @@ pub fn decode_leaf(
                         REF_FRAME1.with(|rf| {
                             REF_F2PRED.with(|rp| {
                                 if let (Some(r0), Some(pr)) = (rf.borrow()[0].as_ref(), rp.borrow().as_ref()) {
-                                    let mut pred = vec![0i32; w * h];
+                                    let mut pred = crate::scratch::zeroed(w * h);
                                     crate::av2_warp::warp_affine(r0, &mut pred, w, &matrix, &abcd, bx4, by4, w, h, 0, 0, bdmax_g());
                                     let mut ok = true;
                                     'w: for yy in 0..h {
@@ -4564,7 +4560,7 @@ pub fn decode_leaf(
                                     let (mut oku, mut okv) = (false, false);
                                     for pl in 0..2 {
                                         if let (Some(r), Some(pr)) = (rfb[pl + 1].as_ref(), rpb[pl].as_ref()) {
-                                            let mut pred = vec![0i32; cw * ch];
+                                            let mut pred = crate::scratch::zeroed(cw * ch);
                                             crate::av2_warp::warp_affine(r, &mut pred, cw, &matrix, &abcd, bx4, by4, cw, ch, ss_g().0 as u32, ss_g().1 as u32, bdmax_g());
                                             let mut ok = true;
                                             'wc: for yy in 0..ch {
@@ -4963,7 +4959,7 @@ pub fn decode_leaf(
                 let dcq = crate::av2_frame::F2_DCQ.with(|c| c.get()[0]);
                 let iqm = crate::av2_qm::iqm_slice(0, uw, uh,
                     ((utxtp & 7) & 3) != 1 && (((utxtp >> 5) & 7) & 3) != 1);
-                let mut coeff = vec![0i32; n];
+                let mut coeff = crate::scratch::zeroed(n);
                 for i in 0..n.min(cf.len()) {
                     let lvl = cf[i];
                     if lvl != 0 {
@@ -5006,7 +5002,7 @@ pub fn decode_leaf(
                 }
                 const DAV2MINE: [usize; 8] = [0, 3, 1, 2, 4, 5, 6, 7];
                 let (row_ty, col_ty) = (DAV2MINE[(txtp & 7) as usize], DAV2MINE[((txtp >> 5) & 7) as usize]);
-                let mut residual = vec![0i32; n];
+                let mut residual = crate::scratch::zeroed(n);
                 crate::av2_itx::inv_txfm_2d(&coeff, *uslw, *uslh, row_ty, col_ty, &mut residual);
                 let off = uy * 4 * w + ux * 4;
                 crate::av2_itx::residual_add(&mut luma_pred[off..], w, &residual, uw.min(w - ux * 4), uh.min(h - uy * 4), 0, 0, 0, bdmax_g());
@@ -5052,10 +5048,9 @@ pub fn decode_leaf(
                     for yy in 0..hc {
                         let dst = (by4 * 4 + yy) * stride + bx4 * 4;
                         for xx in 0..wc {
-                            f.pl[0].px[dst + xx] = luma_pred[yy * w + xx].clamp(0, bdmax_g());
+                            f.pl[0].px[dst + xx] = luma_pred[yy * w + xx].clamp(0, bdmax_g()) as u16;
                         }
                     }
-                    crate::av2_frame::write_recon_pad(0, bx4 * 4, by4 * 4, &luma_pred, w, h);
         mscore_luma("inter", bx4 * 4, by4 * 4, w, h, &luma_pred, w);
                 }
                 // Mark the luma deblock edge grids (joint=0 — inter blocks aren't smooth) so the
@@ -5069,7 +5064,7 @@ pub fn decode_leaf(
                                 for xx in 0..(bw4 * 4) {
                                     let (px, py) = (bx4 * 4 + xx, by4 * 4 + yy);
                                     if px < rp.w && py < rp.h && px < f.pl[0].w && py < f.pl[0].h {
-                                        let m = f.pl[0].px[py * f.pl[0].stride + px];
+                                        let m = f.pl[0].px[py * f.pl[0].stride + px] as i32;
                                         if m != rp.at(px, py) {
                                             crate::dlog!("BLKMISS[inter] fn={} ({bx4},{by4}) w={} h={} at({xx},{yy}) mine={m} dav={}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()), bw4 * 4, bh4 * 4, rp.at(px, py));
                                             break 'chk;
@@ -6425,7 +6420,7 @@ fn mscref_check(bx4: usize, by4: usize, w: usize, h: usize, tag: &str) {
         if c.is_none() {
             if let Ok(b) = std::fs::read(&path) {
                 let mut p = crate::av2_frame::Plane::alloc(432, 240);
-                for i in 0..(432 * 240).min(b.len()) { p.px[i] = b[i] as i32; }
+                for i in 0..(432 * 240).min(b.len()) { p.px[i] = b[i] as u16; }
                 *c = Some(p);
             }
         }
@@ -6437,7 +6432,7 @@ fn mscref_check(bx4: usize, by4: usize, w: usize, h: usize, tag: &str) {
                 for xx in 0..w {
                     let (px, py) = (bx4 * 4 + xx, by4 * 4 + yy);
                     if px < rp.w && py < rp.h && px < f.pl[0].w && py < f.pl[0].h {
-                        let m = f.pl[0].px[py * f.pl[0].stride + px];
+                        let m = f.pl[0].px[py * f.pl[0].stride + px] as i32;
                         if m != rp.at(px, py) {
                             crate::dlog!("MSCREF[{tag}] ({bx4},{by4}) w={w} h={h} at({xx},{yy}) mine={m} dav={}", rp.at(px, py));
                             return;
@@ -6609,7 +6604,7 @@ fn recon_intra_luma(
                 crate::av2_frame::gather_edges(&f.pl[0], px0, py0, w, h, have_top, have_left, n_tr, n_bl, base)
             }
         });
-        let mut pred = vec![0i32; w * h];
+        let mut pred = crate::scratch::zeroed(w * h);
         match y_mode {
             0 => {
                 // DC: avm dispatches by neighbour availability, then applies the IBP gradient.
@@ -6658,11 +6653,7 @@ fn recon_intra_luma(
                     if let Some(rp) = rb.as_ref() {
                         recon_dir_mrl(&mut pred, w, h, rp, px0, py0, p_angle, mrl_index as i32, sb_bnd, multi_mrl, have_top, have_left, n_tr, n_bl, base, bdmax);
                     } else {
-                        crate::av2_frame::RECON_PAD.with(|p| {
-                            let pad = p.borrow();
-                            let src = pad.first().filter(|pl| pl.w != 0).unwrap_or(&f.pl[0]);
-                            recon_dir_mrl(&mut pred, w, h, src, px0, py0, p_angle, mrl_index as i32, sb_bnd, multi_mrl, have_top, have_left, n_tr, n_bl, base, bdmax);
-                        });
+                        recon_dir_mrl(&mut pred, w, h, &f.pl[0], px0, py0, p_angle, mrl_index as i32, sb_bnd, multi_mrl, have_top, have_left, n_tr, n_bl, base, bdmax);
                     }
                 });
             }
@@ -6698,7 +6689,7 @@ fn recon_intra_luma(
             let dcq = crate::av2_frame::F2_DCQ.with(|c| c.get()[0]);
             let iqm = crate::av2_qm::iqm_slice(0, w, h,
                 !fsc && ((txtp & 7) & 3) != 1 && (((txtp >> 5) & 7) & 3) != 1);
-            let mut coeff = vec![0i32; n];
+            let mut coeff = crate::scratch::zeroed(n);
             for i in 0..n.min(cf.len()) {
                 let lvl = cf[i];
                 if lvl != 0 {
@@ -6722,7 +6713,7 @@ fn recon_intra_luma(
             } else {
                 (T1D[(txtp & 7) as usize & 3], T1D[((txtp >> 5) & 7) as usize & 3])
             };
-            let mut residual = vec![0i32; n];
+            let mut residual = crate::scratch::zeroed(n);
             crate::av2_itx::inv_txfm_2d(&coeff, slw, slh, row_ty, col_ty, &mut residual);
             let dump_px = std::env::var("MDQDUMP").map_or(false, |v| v == format!("{bx4},{by4}"));
             if dump_px {
@@ -6773,7 +6764,6 @@ fn recon_intra_luma(
             f.pl[0].set_row(px0, py0 + y, &pred[y * w..y * w + wc]);
         }
         // Mirror the FULL block (incl. off-frame spill) into the padded gather buffer.
-        crate::av2_frame::write_recon_pad(0, px0, py0, &pred, w, h);
         mscore_luma("intra", px0, py0, w, h, &pred, w);
         // Debug (env BRDBG): print the bottom-right block's gathered neighbours + pred so the
         // DC-from-0 cascade ROOT is visible (the first block whose top/left is wrongly 0).
@@ -7462,11 +7452,7 @@ fn recon_intra_chroma(
                 if let Some(rp) = rb[pl].as_ref() {
                     crate::av2_frame::gather_edges(rp, px0, py0, w, h, have_top, have_left, n_tr, n_bl, base)
                 } else {
-                    crate::av2_frame::RECON_PAD.with(|p| {
-                        let pad = p.borrow();
-                        let src = pad.get(pl + 1).filter(|pl| pl.w != 0).unwrap_or(&f.pl[pl + 1]);
-                        crate::av2_frame::gather_edges(src, px0, py0, w, h, have_top, have_left, n_tr, n_bl, base)
-                    })
+                    crate::av2_frame::gather_edges(&f.pl[pl + 1], px0, py0, w, h, have_top, have_left, n_tr, n_bl, base)
                 }
             });
             // TILE/FRAME-BOTTOM left-column clamp (dav prepare_intra_edges max_height =
@@ -7499,7 +7485,7 @@ fn recon_intra_chroma(
                     }
                 }
             }
-            let mut pred = vec![0i32; w * h];
+            let mut pred = crate::scratch::zeroed(w * h);
             use crate::av2_ipred::*;
             if let Some((ref pu, ref pv)) = cfl_pred {
                 // CfL EXPLICIT/IMPLICIT full prediction (luma-AC applied).
@@ -7564,7 +7550,7 @@ fn recon_intra_chroma(
                 let n = w * h;
                 // Intra chroma txtp is mode-derived and ALWAYS a 2D (DCT/ADST) combo — QM applies.
                 let iqm = crate::av2_qm::iqm_slice(1 + pl, w, h, true);
-                let mut coeff = vec![0i32; n];
+                let mut coeff = crate::scratch::zeroed(n);
                 for i in 0..n.min(cf.len()) {
                     let lvl = cf[i];
                     if lvl != 0 {
@@ -7575,7 +7561,7 @@ fn recon_intra_chroma(
                         coeff[i] = if lvl < 0 { -mag } else { mag };
                     }
                 }
-                let mut residual = vec![0i32; n];
+                let mut residual = crate::scratch::zeroed(n);
                 // Intra chroma txtp is MODE-DERIVED (dav2d recon_tmpl.c:480 + dav2d_txtp_from_uvmode).
                 // Parse-safe (all these are TX_CLASS_2D, so the coef context is unaffected) but the
                 // inverse transform differs: DC/D45 → DCT_DCT, V/D113/D67/SMOOTH_V → ADST_DCT,
@@ -7641,7 +7627,6 @@ fn recon_intra_chroma(
             for y in 0..hc {
                 f.pl[pl + 1].set_row(px0, py0 + y, &pred[y * w..y * w + wc]);
             }
-            crate::av2_frame::write_recon_pad(pl + 1, px0, py0, &pred, w, h);
             mscore_chroma(pl + 1, px0, py0, w, h, &pred);
         }
         REF_CHROMA_SCORE.with(|s| {

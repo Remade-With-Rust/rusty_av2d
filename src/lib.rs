@@ -141,6 +141,7 @@ mod cdf_av2;
 mod const_fn;
 pub mod cpu;
 pub mod prof;
+pub mod scratch;
 pub mod simd;
 mod ctx;
 mod cursor;

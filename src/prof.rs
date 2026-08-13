@@ -6,8 +6,10 @@
 //! [`report`] prints the table. The CLI calls `report` at exit; library users can
 //! call it whenever.
 //!
-//!     cargo build --release --features profiling
-//!     target/release/dav1d -i clip.ivf -o out.yuv --threads 1   # table on stderr
+//! ```text
+//! cargo build --release --features profiling
+//! target/release/dav1d -i clip.ivf -o out.yuv --threads 1   # table on stderr
+//! ```
 //!
 //! The counters are process-global atomics (not thread-locals) so the report is
 //! complete even though decode runs on a worker thread.

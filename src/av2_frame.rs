@@ -7,10 +7,13 @@
 
 use std::cell::RefCell;
 
-/// One reconstructed plane: `stride`-major `i32` samples.
+/// One reconstructed plane: `stride`-major `u16` samples (docs/plan.md Phase 1
+/// item 1 — samples were `i32`, which was 2–4× the memory traffic the data
+/// needs and halved every vector's effective width; `u16` covers 8- and
+/// 10/12-bit content in one layout, and block-local intermediates stay `i32`).
 #[derive(Default, Clone)]
 pub struct Plane {
-    pub px: Vec<i32>,
+    pub px: Vec<u16>,
     pub w: usize,
     pub h: usize,
     pub stride: usize,
@@ -19,17 +22,11 @@ pub struct Plane {
 impl Plane {
     pub(crate) fn alloc(w: usize, h: usize) -> Self {
         let stride = w;
-        Plane { px: vec![0i32; stride * h.max(1)], w, h, stride }
+        Plane { px: vec![0u16; stride * h.max(1)], w, h, stride }
     }
     /// Allocate a plane whose stride/height are rounded UP to a superblock multiple (`sb`), so a
     /// block spilling past the visible `w`/`h` edge still fits. `w`/`h` are set to the PADDED dims
     /// (not the visible ones) so an intra-edge gather over this plane clamps to the padded extent
-    /// and reads the real off-frame reconstruction. Used only for the `RECON_PAD` gather buffer.
-    pub(crate) fn alloc_padded(vis_w: usize, vis_h: usize, sb: usize) -> Self {
-        let pw = vis_w.div_ceil(sb) * sb;
-        let ph = vis_h.div_ceil(sb) * sb;
-        Plane { px: vec![0i32; pw * ph.max(1)], w: pw, h: ph, stride: pw }
-    }
     #[inline]
     #[track_caller]
     pub fn at(&self, x: usize, y: usize) -> i32 {
@@ -41,7 +38,7 @@ impl Plane {
         // from block geometry; a corrupt stream can push any of them outside the plane. Reading
         // 0 outside is the same discipline as the C reference's edge emulation, and it removes
         // the whole class at the source rather than caller by caller.
-        self.px.get(i).copied().unwrap_or(0)
+        self.px.get(i).map(|&v| v as i32).unwrap_or(0)
     }
 
     /// Checked pixel WRITE — the write-side twin of `at()`. Out-of-plane writes are dropped
@@ -52,7 +49,7 @@ impl Plane {
     pub fn set_at(&mut self, x: usize, y: usize, v: i32) {
         let i = y * self.stride + x;
         if let Some(p) = self.px.get_mut(i) {
-            *p = v;
+            *p = v as u16;
         }
     }
 
@@ -61,8 +58,8 @@ impl Plane {
     pub fn set_row(&mut self, x: usize, y: usize, src: &[i32]) {
         let base = y * self.stride + x;
         let n = src.len().min(self.px.len().saturating_sub(base));
-        if n > 0 {
-            self.px[base..base + n].copy_from_slice(&src[..n]);
+        for (d, &v) in self.px[base..base + n].iter_mut().zip(src) {
+            *d = v as u16;
         }
     }
 }
@@ -571,7 +568,7 @@ thread_local! {
     /// the bit-exact, stride==w filter chain). A later block's intra gather reads THIS instead of
     /// `f.pl` (when no dav reference is loaded), so an edge block's off-frame top-right/left samples
     /// are the REAL recon of the spilling neighbour — matching dav's aligned picture buffer.
-    pub static RECON_PAD: RefCell<Vec<Plane>> = const { RefCell::new(Vec::new()) };
+
     /// Stage D: frame-1 reconstructed+FILTERED output planes [Y, U, V] — the inter-prediction
     /// reference (dav2d `f->refp[0]`). Loaded from the normal (filtered) dav2d frame-1 output.
     pub static REF_FRAME1: RefCell<[Option<Plane>; 3]> = const { RefCell::new([None, None, None]) };
@@ -653,7 +650,7 @@ pub fn load_ref_luma(path: &str, w: usize, h: usize) {
             let mut p = Plane::alloc(w, h);
             for i in 0..w * h {
                 if !crate::av2_recon::work_tick("frm:598") { break; }
-                p.px[i] = bytes[i] as i32;
+                p.px[i] = bytes[i] as u16;
             }
             REF_LUMA.with(|r| *r.borrow_mut() = Some(p));
             REF_SCORE.with(|s| s.set((0, 0)));
@@ -672,8 +669,8 @@ pub fn load_ref_chroma(path: &str, cw: usize, ch: usize, luma_sz: usize) {
             let mut pv = Plane::alloc(cw, ch);
             for i in 0..csz {
                 if !crate::av2_recon::work_tick("frm:616") { break; }
-                pu.px[i] = bytes[luma_sz + i] as i32;
-                pv.px[i] = bytes[luma_sz + csz + i] as i32;
+                pu.px[i] = bytes[luma_sz + i] as u16;
+                pv.px[i] = bytes[luma_sz + csz + i] as u16;
             }
             REF_CHROMA.with(|r| *r.borrow_mut() = [Some(pu), Some(pv)]);
             REF_CHROMA_SCORE.with(|s| s.set((0, 0, 0)));
@@ -694,12 +691,12 @@ pub fn load_ref_frame1(path: &str, w: usize, h: usize) {
             let mut pv = Plane::alloc(cw, ch);
             for i in 0..luma_sz {
                 if !crate::av2_recon::work_tick("frm:637") { break; }
-                py.px[i] = bytes[i] as i32;
+                py.px[i] = bytes[i] as u16;
             }
             for i in 0..csz {
                 if !crate::av2_recon::work_tick("frm:640") { break; }
-                pu.px[i] = bytes[luma_sz + i] as i32;
-                pv.px[i] = bytes[luma_sz + csz + i] as i32;
+                pu.px[i] = bytes[luma_sz + i] as u16;
+                pv.px[i] = bytes[luma_sz + csz + i] as u16;
             }
             REF_FRAME1.with(|r| *r.borrow_mut() = [Some(py), Some(pu), Some(pv)]);
             INTER_SCORE.with(|s| s.set((0, 0)));
@@ -845,13 +842,7 @@ pub fn reset_frame(w: usize, h: usize, yac: u8, edge_filter: bool, ibp: bool, bd
     let (cw, ch) = ((w + ss_hor as usize) >> ss_hor, (h + ss_ver as usize) >> ss_ver);
     // SB-aligned padded recon mirror (luma SB=64px, chroma SB = 64>>ss_hor px) for the
     // edge-block gather.
-    RECON_PAD.with(|p| {
-        *p.borrow_mut() = vec![
-            Plane::alloc_padded(w, h, 64),
-            Plane::alloc_padded(cw, ch, 64 >> ss_hor),
-            Plane::alloc_padded(cw, ch, 64 >> ss_hor),
-        ];
-    });
+
     FRAME.with(|f| {
         let mut f = f.borrow_mut();
         f.pl[0] = Plane::alloc(w, h);
@@ -1028,7 +1019,7 @@ pub fn dbg_block_miss(bx4: usize, by4: usize, bw4: usize, bh4: usize, tag: &str)
                         if !crate::av2_recon::work_tick("frm:953") { break; }
                         let (px, py) = (bx4 * 4 + xx, by4 * 4 + yy);
                         if px < rp.w && py < rp.h {
-                            let m = f.pl[0].px[py * f.pl[0].stride + px];
+                            let m = f.pl[0].px[py * f.pl[0].stride + px] as i32;
                             if m != rp.at(px, py) {
                                 crate::dlog!("BLKMISS[{tag}] fn={} ({bx4},{by4}) w={w} h={h} at({xx},{yy}) mine={m} dav={}", DECODE_FRAME_N.with(|c| c.get()), rp.at(px, py));
                                 return;
@@ -1061,7 +1052,7 @@ pub fn dbg_block_miss_c(px0: usize, py0: usize, w: usize, h: usize, tag: &str) {
                         if !crate::av2_recon::work_tick("frm:984") { break; }
                         let (px, py) = (px0 + xx, py0 + yy);
                         if px < rp.w && py < rp.h {
-                            let m = f.pl[pl + 1].px[py * f.pl[pl + 1].stride + px];
+                            let m = f.pl[pl + 1].px[py * f.pl[pl + 1].stride + px] as i32;
                             if m != 0 && m != rp.at(px, py) {
                                 crate::dlog!("CBLKMISS[{tag}] pl={pl} ({px0},{py0}) w={w} h={h} at({xx},{yy}) mine={m} dav={}", rp.at(px, py));
                                 return;
@@ -1074,31 +1065,6 @@ pub fn dbg_block_miss_c(px0: usize, py0: usize, w: usize, h: usize, tag: &str) {
     });
 }
 
-/// Mirror a block's reconstructed pixels (`pred`, `w`×`h` row-major, clamped to `[0,255]`) into the
-/// padded `RECON_PAD[plane]` at pixel `(px0, py0)` — the FULL extent (incl. any off-frame spill),
-/// so a later block's intra gather over `RECON_PAD` reads real off-frame recon. No-op if the pad
-/// isn't allocated. Safe to call while `FRAME` is borrowed (touches only `RECON_PAD`).
-pub fn write_recon_pad(plane: usize, px0: usize, py0: usize, pred: &[i32], w: usize, h: usize) {
-    crate::prof_scope!(5);
-    RECON_PAD.with(|p| {
-        let mut pad = p.borrow_mut();
-        if plane >= pad.len() { return; }
-        let pl = &mut pad[plane];
-        if pl.w == 0 { return; }
-        let (pw, ph, stride) = (pl.w, pl.h, pl.stride);
-        let wc = w.min(pw.saturating_sub(px0));
-        let hc = h.min(ph.saturating_sub(py0));
-        let bdmax = BDMAX.with(|c| c.get());
-        for y in 0..hc {
-            if !crate::av2_recon::work_tick("frm:1014") { break; }
-            let dst = (py0 + y) * stride + px0;
-            for x in 0..wc {
-                if !crate::av2_recon::work_tick("frm:1016") { break; }
-                pl.px[dst + x] = pred[y * w + x].clamp(0, bdmax);
-            }
-        }
-    });
-}
 
 /// Tag the luma block-type map over a `w4`×`h4` block at `(bx4, by4)` (4px units) with `t`.
 /// Reads dims from BTYPE_WH (NOT FRAME) so it is safe to call while FRAME is borrowed.
@@ -1634,9 +1600,12 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         });
         let _ = std::fs::write(format!("{prefix}_{n}.yuv"), &out);
     }
+    // The in-loop filter chain works in i32 (intermediates go negative); the planes
+    // are u16, so widen once here and narrow once at the write-back below.
+    let widen = |v: &Vec<u16>| -> Vec<i32> { v.iter().map(|&x| x as i32).collect() };
     let (mut pl0, mut pl1, mut pl2) = FRAME.with(|fr| {
         let f = fr.borrow();
-        (f.pl[0].px.clone(), f.pl[1].px.clone(), f.pl[2].px.clone())
+        (widen(&f.pl[0].px), widen(&f.pl[1].px), widen(&f.pl[2].px))
     });
     if let Ok(prefix) = std::env::var("PREFDUMP") {
         thread_local! { static PREF_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
@@ -2095,9 +2064,14 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     }
     FRAME.with(|fr| {
         let mut f = fr.borrow_mut();
-        f.pl[0].px = pl0;
-        f.pl[1].px = pl1;
-        f.pl[2].px = pl2;
+        // Narrow back to the u16 planes (values are post-filter pixels in [0, bdmax]).
+        let narrow = |dst: &mut Vec<u16>, src: &Vec<i32>| {
+            dst.clear();
+            dst.extend(src.iter().map(|&v| v as u16));
+        };
+        narrow(&mut f.pl[0].px, &pl0);
+        narrow(&mut f.pl[1].px, &pl1);
+        narrow(&mut f.pl[2].px, &pl2);
     });
 }
 

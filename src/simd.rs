@@ -233,6 +233,185 @@ pub fn fir8_col(src: &[i32], stride: usize, taps: &[i8; 8], out: &mut [i32], rnd
 }
 
 // ---------------------------------------------------------------------------
+// u16-source variants (Phase 1 item 1): the PLANES are u16; widening happens on
+// load, inside the vector, halving the reference-read memory traffic vs i32.
+// The mid/prep buffers stay i32 (intermediates go negative and exceed 16 bits).
+// ---------------------------------------------------------------------------
+
+pub fn fir8_row_u16_scalar(src: &[u16], taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
+    for (x, o) in out.iter_mut().enumerate() {
+        let s0 = &src[x..x + 8];
+        let s: i32 = (0..8).map(|k| taps[k] as i32 * s0[k] as i32).sum();
+        let v = (s + rnd) >> sh;
+        *o = if clamp_max >= 0 { v.clamp(0, clamp_max) } else { v };
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn fir8_row_u16_avx2(src: &[u16], taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
+    use core::arch::x86_64::*;
+    let n = out.len();
+    let mut x = 0usize;
+    let vr = _mm256_set1_epi32(rnd);
+    let sh_v = _mm_cvtsi32_si128(sh);
+    let zero = _mm256_setzero_si256();
+    let vmax = _mm256_set1_epi32(clamp_max);
+    let t: [__m256i; 8] = core::array::from_fn(|k| _mm256_set1_epi32(taps[k] as i32));
+    while x + 8 <= n {
+        let mut acc = vr;
+        for (k, tk) in t.iter().enumerate() {
+            let s16 = _mm_loadu_si128(src.as_ptr().add(x + k) as *const __m128i);
+            let s = _mm256_cvtepu16_epi32(s16);
+            acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(s, *tk));
+        }
+        let mut v = _mm256_sra_epi32(acc, sh_v);
+        if clamp_max >= 0 {
+            v = _mm256_min_epi32(_mm256_max_epi32(v, zero), vmax);
+        }
+        _mm256_storeu_si256(out.as_mut_ptr().add(x) as *mut __m256i, v);
+        x += 8;
+    }
+    if x < n {
+        fir8_row_u16_scalar(&src[x..], taps, &mut out[x..], rnd, sh, clamp_max);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn fir8_row_u16_neon(src: &[u16], taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
+    use core::arch::aarch64::*;
+    let n = out.len();
+    let mut x = 0usize;
+    let vr = vdupq_n_s32(rnd);
+    let vsh = vdupq_n_s32(-sh);
+    let zero = vdupq_n_s32(0);
+    let vmax = vdupq_n_s32(clamp_max);
+    let t: [int32x4_t; 8] = core::array::from_fn(|k| vdupq_n_s32(taps[k] as i32));
+    while x + 4 <= n {
+        let mut acc = vr;
+        for (k, tk) in t.iter().enumerate() {
+            let s16 = vld1_u16(src.as_ptr().add(x + k));
+            let s = vreinterpretq_s32_u32(vmovl_u16(s16));
+            acc = vmlaq_s32(acc, s, *tk);
+        }
+        let mut v = vshlq_s32(acc, vsh);
+        if clamp_max >= 0 {
+            v = vminq_s32(vmaxq_s32(v, zero), vmax);
+        }
+        vst1q_s32(out.as_mut_ptr().add(x), v);
+        x += 4;
+    }
+    if x < n {
+        fir8_row_u16_scalar(&src[x..], taps, &mut out[x..], rnd, sh, clamp_max);
+    }
+}
+
+/// Dispatching u16-source 8-tap row FIR. `src.len() >= out.len() + 7`.
+#[inline]
+pub fn fir8_row_u16(src: &[u16], taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
+    debug_assert!(src.len() >= out.len() + 7);
+    #[cfg(target_arch = "x86_64")]
+    if simd_level() >= 1 {
+        // SAFETY: avx2 verified; bounds asserted.
+        unsafe { fir8_row_u16_avx2(src, taps, out, rnd, sh, clamp_max) };
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if simd_level() >= 1 {
+        // SAFETY: NEON baseline; bounds asserted.
+        unsafe { fir8_row_u16_neon(src, taps, out, rnd, sh, clamp_max) };
+        return;
+    }
+    fir8_row_u16_scalar(src, taps, out, rnd, sh, clamp_max);
+}
+
+pub fn fir8_col_u16_scalar(src: &[u16], stride: usize, taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
+    for (x, o) in out.iter_mut().enumerate() {
+        let s: i32 = (0..8).map(|k| taps[k] as i32 * src[k * stride + x] as i32).sum();
+        let v = (s + rnd) >> sh;
+        *o = if clamp_max >= 0 { v.clamp(0, clamp_max) } else { v };
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn fir8_col_u16_avx2(src: &[u16], stride: usize, taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
+    use core::arch::x86_64::*;
+    let n = out.len();
+    let mut x = 0usize;
+    let vr = _mm256_set1_epi32(rnd);
+    let sh_v = _mm_cvtsi32_si128(sh);
+    let zero = _mm256_setzero_si256();
+    let vmax = _mm256_set1_epi32(clamp_max);
+    let t: [__m256i; 8] = core::array::from_fn(|k| _mm256_set1_epi32(taps[k] as i32));
+    while x + 8 <= n {
+        let mut acc = vr;
+        for (k, tk) in t.iter().enumerate() {
+            let s16 = _mm_loadu_si128(src.as_ptr().add(k * stride + x) as *const __m128i);
+            let s = _mm256_cvtepu16_epi32(s16);
+            acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(s, *tk));
+        }
+        let mut v = _mm256_sra_epi32(acc, sh_v);
+        if clamp_max >= 0 {
+            v = _mm256_min_epi32(_mm256_max_epi32(v, zero), vmax);
+        }
+        _mm256_storeu_si256(out.as_mut_ptr().add(x) as *mut __m256i, v);
+        x += 8;
+    }
+    if x < n {
+        fir8_col_u16_scalar(&src[x..], stride, taps, &mut out[x..], rnd, sh, clamp_max);
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+unsafe fn fir8_col_u16_neon(src: &[u16], stride: usize, taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
+    use core::arch::aarch64::*;
+    let n = out.len();
+    let mut x = 0usize;
+    let vr = vdupq_n_s32(rnd);
+    let vsh = vdupq_n_s32(-sh);
+    let zero = vdupq_n_s32(0);
+    let vmax = vdupq_n_s32(clamp_max);
+    let t: [int32x4_t; 8] = core::array::from_fn(|k| vdupq_n_s32(taps[k] as i32));
+    while x + 4 <= n {
+        let mut acc = vr;
+        for (k, tk) in t.iter().enumerate() {
+            let s16 = vld1_u16(src.as_ptr().add(k * stride + x));
+            let s = vreinterpretq_s32_u32(vmovl_u16(s16));
+            acc = vmlaq_s32(acc, s, *tk);
+        }
+        let mut v = vshlq_s32(acc, vsh);
+        if clamp_max >= 0 {
+            v = vminq_s32(vmaxq_s32(v, zero), vmax);
+        }
+        vst1q_s32(out.as_mut_ptr().add(x), v);
+        x += 4;
+    }
+    if x < n {
+        fir8_col_u16_scalar(&src[x..], stride, taps, &mut out[x..], rnd, sh, clamp_max);
+    }
+}
+
+/// Dispatching u16-source vertical 8-tap. `src.len() >= 7*stride + out.len()`.
+#[inline]
+pub fn fir8_col_u16(src: &[u16], stride: usize, taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
+    debug_assert!(src.len() >= 7 * stride + out.len());
+    #[cfg(target_arch = "x86_64")]
+    if simd_level() >= 1 {
+        // SAFETY: avx2 verified; bounds asserted.
+        unsafe { fir8_col_u16_avx2(src, stride, taps, out, rnd, sh, clamp_max) };
+        return;
+    }
+    #[cfg(target_arch = "aarch64")]
+    if simd_level() >= 1 {
+        // SAFETY: NEON baseline; bounds asserted.
+        unsafe { fir8_col_u16_neon(src, stride, taps, out, rnd, sh, clamp_max) };
+        return;
+    }
+    fir8_col_u16_scalar(src, stride, taps, out, rnd, sh, clamp_max);
+}
+
+// ---------------------------------------------------------------------------
 // Compound blends (Phase 2 map #3): elementwise over prep-precision rows.
 // ---------------------------------------------------------------------------
 
@@ -515,6 +694,25 @@ mod tests {
             fir8_col_scalar(&src, stride, &taps, &mut a, 512, 10, 255);
             fir8_col(&src, stride, &taps, &mut b, 512, 10, 255);
             assert_eq!(a, b, "fir8_col trial {trial} n={n}");
+        }
+    }
+
+    #[test]
+    fn fir8_u16_matches_scalar() {
+        let mut st = 0x5eedu64;
+        for trial in 0..200 {
+            let n = 1 + (xorshift(&mut st) % 130) as usize;
+            let stride = n + (xorshift(&mut st) % 8) as usize;
+            let src: Vec<u16> = (0..7 * stride + n + 7).map(|_| (xorshift(&mut st) % 1024) as u16).collect();
+            let taps: [i8; 8] = core::array::from_fn(|_| (xorshift(&mut st) as i8) / 2);
+            let mut a = vec![0i32; n];
+            let mut b = vec![0i32; n];
+            fir8_row_u16_scalar(&src, &taps, &mut a, 34, 6, 255);
+            fir8_row_u16(&src, &taps, &mut b, 34, 6, 255);
+            assert_eq!(a, b, "fir8_row_u16 trial {trial}");
+            fir8_col_u16_scalar(&src, stride, &taps, &mut a, 2, 2, -1);
+            fir8_col_u16(&src, stride, &taps, &mut b, 2, 2, -1);
+            assert_eq!(a, b, "fir8_col_u16 trial {trial}");
         }
     }
 

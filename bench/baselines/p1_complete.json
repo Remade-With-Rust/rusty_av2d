@@ -1,0 +1,41 @@
+{
+ "note": "wall ms per whole-process decode, --threads 1, median of reps (1 warmup)",
+ "clips": {
+  "v640x360": {
+   "median_ms": 1616.6,
+   "min_ms": 1218.4,
+   "max_ms": 1993.9,
+   "reps": 5
+  },
+  "v432_16f_tipout": {
+   "median_ms": 5015.0,
+   "min_ms": 3867.2,
+   "max_ms": 7658.4,
+   "reps": 5
+  },
+  "v432_8f_sb128cdef": {
+   "median_ms": 1246.7,
+   "min_ms": 720.3,
+   "max_ms": 1628.2,
+   "reps": 5
+  },
+  "v320x480_still_cpu3": {
+   "median_ms": 280.3,
+   "min_ms": 246.9,
+   "max_ms": 338.2,
+   "reps": 5
+  },
+  "v432_8f_lr": {
+   "median_ms": 1356.4,
+   "min_ms": 1088.7,
+   "max_ms": 1662.2,
+   "reps": 5
+  },
+  "v432_4f_grain": {
+   "median_ms": 578.6,
+   "min_ms": 498.4,
+   "max_ms": 970.2,
+   "reps": 5
+  }
+ }
+}

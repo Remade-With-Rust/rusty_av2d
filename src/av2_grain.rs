@@ -670,7 +670,16 @@ pub fn apply_grain_to_planes(planes: &mut [crate::av2_frame::Plane; 3], id: u8, 
     let [p0, p1, p2] = planes;
     let (cw, ch) = (p1.w, p1.h);
     let _ = (cw, ch);
+    // Grain synthesis works in i32 (it adds signed noise before the clamp); widen the
+    // u16 planes around the call. One copy each way per grain frame — grain streams
+    // only, and the synthesis itself dominates.
+    let mut y32: Vec<i32> = p0.px.iter().map(|&v| v as i32).collect();
+    let mut u32b: Vec<i32> = p1.px.iter().map(|&v| v as i32).collect();
+    let mut v32: Vec<i32> = p2.px.iter().map(|&v| v as i32).collect();
     add_film_grain(
-        &params, seed, &mut p0.px, &mut p1.px, &mut p2.px, w, h, ls, cs, ssy, ssx,
+        &params, seed, &mut y32, &mut u32b, &mut v32, w, h, ls, cs, ssy, ssx,
     );
+    for (d, &v) in p0.px.iter_mut().zip(&y32) { *d = v as u16; }
+    for (d, &v) in p1.px.iter_mut().zip(&u32b) { *d = v as u16; }
+    for (d, &v) in p2.px.iter_mut().zip(&v32) { *d = v as u16; }
 }

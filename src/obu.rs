@@ -2668,7 +2668,7 @@ fn emit_av2_planes(c: &Rav1dContext, state: &mut Rav1dState, planes: &[crate::av
                     let base = y * stride_px;
                     let mut row = comp.slice_mut::<BitDepth16, _>(base..base + src.w);
                     for x in 0..src.w {
-                        row[x] = src.px[y * src.stride + x].clamp(0, bdmax) as u16;
+                        row[x] = (src.px[y * src.stride + x] as i32).clamp(0, bdmax) as u16;
                     }
                 }
             } else {
@@ -3072,7 +3072,7 @@ fn parse_obus(
                     if let Ok(b) = std::fs::read(&crate::av2_recon::cap_path("dav_f2pred.yuv")) {
                         if b.len() >= 432 * 240 {
                             let mut p = crate::av2_frame::Plane::alloc(432, 240);
-                            for i in 0..432 * 240 { p.px[i] = b[i] as i32; }
+                            for i in 0..432 * 240 { p.px[i] = b[i] as u16; }
                             crate::av2_frame::REF_F2PRED.with(|r| *r.borrow_mut() = Some(p));
                             crate::av2_frame::INTER_SCORE.with(|s| s.set((0, 0)));
                         }
@@ -3080,7 +3080,7 @@ fn parse_obus(
                     if let Ok(b) = std::fs::read(&crate::av2_recon::cap_path("dav_f2recon.yuv")) {
                         if b.len() >= 432 * 240 {
                             let mut p = crate::av2_frame::Plane::alloc(432, 240);
-                            for i in 0..432 * 240 { p.px[i] = b[i] as i32; }
+                            for i in 0..432 * 240 { p.px[i] = b[i] as u16; }
                             crate::av2_frame::REF_F2RECON.with(|r| *r.borrow_mut() = Some(p));
                             crate::av2_frame::INTER_SCORE_R.with(|s| s.set((0, 0)));
                         }
@@ -3090,7 +3090,7 @@ fn parse_obus(
                         if b.len() >= 2 * csz {
                             let mut pu = crate::av2_frame::Plane::alloc(216, 120);
                             let mut pv = crate::av2_frame::Plane::alloc(216, 120);
-                            for i in 0..csz { pu.px[i] = b[i] as i32; pv.px[i] = b[csz + i] as i32; }
+                            for i in 0..csz { pu.px[i] = b[i] as u16; pv.px[i] = b[csz + i] as u16; }
                             crate::av2_frame::REF_F2PREDC.with(|r| *r.borrow_mut() = [Some(pu), Some(pv)]);
                             crate::av2_frame::INTER_SCORE_C.with(|s| s.set((0, 0, 0)));
                         }
@@ -3100,7 +3100,7 @@ fn parse_obus(
                         if b.len() >= 2 * csz {
                             let mut pu = crate::av2_frame::Plane::alloc(216, 120);
                             let mut pv = crate::av2_frame::Plane::alloc(216, 120);
-                            for i in 0..csz { pu.px[i] = b[i] as i32; pv.px[i] = b[csz + i] as i32; }
+                            for i in 0..csz { pu.px[i] = b[i] as u16; pv.px[i] = b[csz + i] as u16; }
                             crate::av2_frame::REF_F2RECONC.with(|r| *r.borrow_mut() = [Some(pu), Some(pv)]);
                             crate::av2_frame::INTER_SCORE_RC.with(|s| s.set((0, 0, 0)));
                         }
@@ -3256,7 +3256,7 @@ fn parse_obus(
                                 for y in 0..f.pl[0].h.min(rp.h) {
                                     for x in 0..f.pl[0].w.min(rp.w) {
                                         tot += 1;
-                                        let m = f.pl[0].px[y * f.pl[0].stride + x];
+                                        let m = f.pl[0].px[y * f.pl[0].stride + x] as i32;
                                         if m == rp.at(x, y) { ok += 1; }
                                         else {
                                             let t = (btype.get(y * f.pl[0].w + x).copied().unwrap_or(0) as usize).min(4);
@@ -3275,7 +3275,7 @@ fn parse_obus(
                                     // Dump the bottom-right SB region: mine vs dav, every 4th pixel, rows 200..240 cols 380..432.
                                     let st = f.pl[0].stride;
                                     for y in (200..240).step_by(4) {
-                                        let mine_row: Vec<i32> = (380..432).step_by(4).map(|x| f.pl[0].px[y * st + x]).collect();
+                                        let mine_row: Vec<i32> = (380..432).step_by(4).map(|x| f.pl[0].px[y * st + x] as i32).collect();
                                         let dav_row: Vec<i32> = (380..432).step_by(4).map(|x| rp.at(x, y)).collect();
                                         crate::dlog!("BRDUMP y={y} mine={mine_row:?}");
                                         crate::dlog!("BRDUMP y={y} dav ={dav_row:?}");
@@ -3297,7 +3297,7 @@ fn parse_obus(
                                     for y in 0..f.pl[pl + 1].h.min(rp.h) {
                                         for x in 0..f.pl[pl + 1].w.min(rp.w) {
                                             tot += 1;
-                                            let m = f.pl[pl + 1].px[y * f.pl[pl + 1].stride + x];
+                                            let m = f.pl[pl + 1].px[y * f.pl[pl + 1].stride + x] as i32;
                                             if m == rp.at(x, y) { ok += 1; }
                                             else if m == 0 { unwritten += 1; }
                                             else { wrong += 1; if first_wrong.is_none() { first_wrong = Some((x, y, m, rp.at(x, y))); } }
@@ -3349,8 +3349,8 @@ fn parse_obus(
                     if let (Ok(rl), Ok(rc)) = (std::fs::read(&crate::av2_recon::cap_path("dav_f2recon.yuv")), std::fs::read(&crate::av2_recon::cap_path("dav_f2reconc.yuv"))) {
                         crate::av2_frame::FRAME.with(|fr| {
                             let mut f = fr.borrow_mut();
-                            for i in 0..432 * 240 { f.pl[0].px[i] = rl[i] as i32; }
-                            for i in 0..216 * 120 { f.pl[1].px[i] = rc[i] as i32; f.pl[2].px[i] = rc[216 * 120 + i] as i32; }
+                            for i in 0..432 * 240 { f.pl[0].px[i] = rl[i] as u16; }
+                            for i in 0..216 * 120 { f.pl[1].px[i] = rc[i] as u16; f.pl[2].px[i] = rc[216 * 120 + i] as u16; }
                         });
                     }
                 }
@@ -3398,7 +3398,7 @@ fn parse_obus(
                                 for y in 0..ph.min(f.pl[pl].h) {
                                     for x in 0..pw.min(f.pl[pl].w) {
                                         tot += 1;
-                                        let m = f.pl[pl].px[y * f.pl[pl].stride + x];
+                                        let m = f.pl[pl].px[y * f.pl[pl].stride + x] as i32;
                                         let d = f2[off + y * pw + x] as i32;
                                         if m == d { ok += 1; } else if first.is_none() { first = Some((x, y, m, d)); }
                                     }
@@ -3676,7 +3676,7 @@ fn parse_obus(
                     let mut buf = Vec::with_capacity(p.w * p.h);
                     for y in 0..p.h {
                         for x in 0..p.w {
-                            buf.push(p.px[y * p.stride + x].clamp(0, 255) as u8);
+                            buf.push((p.px[y * p.stride + x] as i32).clamp(0, 255) as u8);
                         }
                     }
                     let _ = std::fs::write(&crate::av2_recon::cap_path("rav2d_f1luma.bin"), &buf);
@@ -3688,7 +3688,7 @@ fn parse_obus(
                             let (mut ok, mut wrong, mut zero, mut first) = (0usize, 0usize, 0usize, None);
                             let (mut first_gap, mut first_wrong): (Option<(usize,usize)>, Option<(usize,usize,i32,i32)>) = (None, None);
                             for y in 0..p.h { for x in 0..p.w {
-                                let m = p.px[y * p.stride + x].clamp(0, 255);
+                                let m = (p.px[y * p.stride + x] as i32).clamp(0, 255);
                                 let d = rp.at(x, y);
                                 if m == d { ok += 1; } else { wrong += 1; if m == 0 { zero += 1; if first_gap.is_none() { first_gap = Some((x,y)); } } else if first_wrong.is_none() { first_wrong = Some((x,y,m,d)); } if first.is_none() { first = Some((x, y, m, d)); } }
                             }}
@@ -3698,7 +3698,7 @@ fn parse_obus(
                                     if let Some((x0,y0)) = pos {
                                         crate::dlog!("F1DUMP {tag} around ({x0},{y0}):");
                                         for y in y0.saturating_sub(1)..(y0+4).min(p.h) {
-                                            let md: Vec<i32> = (x0.saturating_sub(2)..(x0+10).min(p.w)).map(|x| p.px[y*p.stride+x].clamp(0,255) - rp.at(x,y)).collect();
+                                            let md: Vec<i32> = (x0.saturating_sub(2)..(x0+10).min(p.w)).map(|x| (p.px[y*p.stride+x] as i32).clamp(0,255) - rp.at(x,y)).collect();
                                             crate::dlog!("  y={y} x{}.. diff={md:?}", x0.saturating_sub(2));
                                         }
                                     }
@@ -3760,7 +3760,7 @@ fn parse_obus(
                             for y in 0..ph.min(f.pl[pl].h) {
                                 for x in 0..pw.min(f.pl[pl].w) {
                                     tot += 1;
-                                    let m = f.pl[pl].px[y * f.pl[pl].stride + x].clamp(0, 255);
+                                    let m = (f.pl[pl].px[y * f.pl[pl].stride + x] as i32).clamp(0, 255);
                                     let d = b[off + y * pw + x] as i32;
                                     if m == d { ok += 1; } else if first.is_none() { first = Some((x, y, m, d)); }
                                 }
@@ -3801,7 +3801,7 @@ fn parse_obus(
                                 for y in 0..ph.min(f.pl[pl].h) {
                                     for x in 0..pw.min(f.pl[pl].w) {
                                         tot += 1;
-                                        let m = f.pl[pl].px[y * f.pl[pl].stride + x];
+                                        let m = f.pl[pl].px[y * f.pl[pl].stride + x] as i32;
                                         let d = f1[off + y * pw + x] as i32;
                                         if m == d { ok += 1; } else if first.is_none() { first = Some((x, y, m, d)); }
                                     }

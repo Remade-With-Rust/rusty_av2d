@@ -45,10 +45,33 @@ caching hid it — replaced with a pure-Rust `getopt_long`
   quality there unverified), and they are the skeleton the `u8`/`u16`
   narrowing will widen into 16/32-lane wins.
 
-**What remains of the original plan:** Phase 1 item 1 (sample-type narrowing to
-`u8`/`u16` — the single biggest remaining lever, and what makes the SIMD lanes
-real), item 4 (recon-pad audit), the rest of the Phase 2 map (#4 Wiener,
-#5 CDEF, #7 deblock, #8/#9 intra), and threading.
+**Phase 1 completed (0.2.8, same day):**
+- **Item 4 — the recon-pad mirror was scaffolding.** Emptying `RECON_PAD` and
+  letting both readers fall back to `f.pl` decoded the corpus 57/57
+  byte-identical, so the whole mirror (the double-write of every block, the
+  padded buffers, `alloc_padded`) is deleted.
+- **Item 7 — kernel allocations.** `src/scratch.rs`: a thread-local buffer pool
+  with an RAII guard (`scratch::zeroed(n)` keeps the `vec![0; n]` semantics);
+  18 hot per-TU sites converted (`cf`/`coeff`/`residual`/`pred`/…); buffers
+  that escape into structs stay owned `Vec`s.
+- **Item 1 — the sample type is now `u16`.** `Plane.px: Vec<i32>` → `Vec<u16>`
+  (covers 8- and 10/12-bit in one layout; block-local intermediates stay
+  `i32`). The filter chain still works in i32 — widened once at entry,
+  narrowed once at write-back; grain widens around its call. MC reads the
+  planes through new u16-source kernel variants (`fir8_row_u16`/`fir8_col_u16`,
+  AVX2 `cvtepu16` widening on load + NEON `vmovl_u16`, scalar twins,
+  bit-equality tests) — halving reference-read memory traffic.
+- Measured (vs the campaign-start baseline, byte-identical throughout):
+  tipout **−46%** (4225→2273 ms, spreads now tight), sb128+CDEF **−49%**
+  (1410→725), grain **−37%** (928→587), 640×360 **−14%** (508→435), LR ~flat,
+  cpu3 ~+16% (the widen/narrow boundary copies on an intra-only clip — the
+  known cost of keeping the filter chain i32; candidates for a u16 filter pass
+  later). Baselines: `p1_start` → `p1_complete`.
+
+**What remains of the original plan:** the rest of the Phase 2 map (#4 Wiener,
+#5 CDEF, #7 deblock, #8/#9 intra — now against u16 planes where they read
+frames), a possible u16 filter chain (removes the boundary copies), and
+threading.
 
 ---
 
