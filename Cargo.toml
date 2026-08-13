@@ -5,7 +5,7 @@ default-members = [".", "tools"]
 [package]
 name = "rusty_av2d"
 authors = ["Mata Network <https://www.mata.network>", "Rav1d Developers", "Prossimo", "dav1d authors"]
-version = "0.2.6"
+version = "0.2.7"
 edition = "2021"
 rust-version = "1.79"
 description = "Pure-Rust AV2 video decoder, no C/FFI. Byte-identical to the AVM reference decoder across a 57-clip conformance corpus."
@@ -49,6 +49,9 @@ default = ["bitdepth_8", "bitdepth_16", "capi"]
 capi = []
 bitdepth_8 = []
 bitdepth_16 = []
+# Stage profiler (docs/plan.md Phase 0): cumulative per-stage timers + a report
+# table. Zero cost when off (the default); diagnostics only, not for production.
+profiling = []
 
 [profile.dev]
 panic = "abort"

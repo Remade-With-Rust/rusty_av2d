@@ -623,6 +623,7 @@ unsafe fn main_0(argc: c_int, argv: *const *mut c_char) -> c_int {
         res = 1 as c_int;
     }
     dav1d_close(NonNull::new(&mut c));
+    rusty_av2d::prof::report(); // stage table (no-op without the `profiling` feature)
     return if res == 0 { 0 as c_int } else { 1 as c_int };
 }
 

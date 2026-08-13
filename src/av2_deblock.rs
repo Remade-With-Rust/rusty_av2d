@@ -254,6 +254,7 @@ pub fn deblock_plane(
     apply_h: bool,
     tile_v_x4: &[usize],
 ) {
+    crate::prof_scope!(6);
     let nbands = ih4.div_ceil(band_cells);
     for band in 0..nbands {
         if !crate::av2_recon::work_tick("deblock:255") { break; }
@@ -323,7 +324,6 @@ pub fn deblock_plane(
             }
             let band_top = dy == 0;
             for x4 in 0..iw4 {
-                if !crate::av2_recon::work_tick("deblock:319") { break; }
                 let cell = y4 * iw4 + x4;
                 if std::env::var("DBQ13").is_ok() && x4 == 13 && y4 == 16 {
                     crate::dlog!("[DBQ13] rows pass reached (13,16): db_top={} lh={} lh_above={} apply_h={apply_h} mwlen={}", db_top[cell], db_lh[cell], db_lh[cell - iw4], max_width.len());

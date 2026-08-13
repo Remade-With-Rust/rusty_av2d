@@ -1,6 +1,59 @@
 # Plan: SIMD/NEON, and removing the assembly
 
-**Status:** Phase 3 (assembly removal) is **done**. Phases 0–2 are proposed.
+**Status:** Phases 0–3 are **executed** (0.2.7, 2026-08-10). Phase 3 (assembly
+removal) was done first; Phase 0 (harness), Phase 1 (structural), and the first
+Phase 2 kernel families landed together. Results below; the honest headline is
+the plan's own prediction confirmed: **the data-layout work was the win, the
+intrinsics measured ~neutral on x86-64 against the restructured scalar.**
+
+## Execution results (2026-08-10, 0.2.7)
+
+**Phase 0 — done.** `profiling` cargo feature (12 stage timers, zero cost when
+off; report at CLI exit), `bench/bench.py` (Python driver — the Git Bash sweep
+wedge is a fork-storm problem, Python spawning avoids it), committed baseline
+`bench/baselines/p1_start.json`. Incidental find: enabling the feature exposed
+that the CLI's MSVC `getopt.c` shim had gone with the C tree and only build
+caching hid it — replaced with a pure-Rust `getopt_long`
+(`tools/compat/getopt.rs`), so the tools are now C-free too.
+
+**Phase 1 — the structural bricks landed and dominated, as predicted.**
+- `work_tick` hoisted out of 77 innermost per-pixel loops (the bounded
+  `for x in 0..w` loops cannot spin by construction; walkers and row loops keep
+  their ticks, and the budget-trip → error guard from 0.2.6 still fires —
+  verified).
+- MC: per-call `mid` allocation → thread-local scratch; per-sample
+  clamped `at()` → an interior/edge split (one containment test per call,
+  direct row-slice access inside; the clamped path only for genuine boundary
+  blocks). `mc_translate`/`mc_translate_prep` now share one `mc_core`.
+- Measured (idle machine, median of 5, byte-identical): **tipout −47%,
+  film-grain clip −36%, 640×360 −19.5%**, sb128+CDEF −56% (later run).
+- Post-change profile (tipout): `inter_mc` 14.7% → **8.5%**; coef 0.1%,
+  itx 0.2%, recon_pad 0.2%. The remaining ~85% of the SB loop is the untimed
+  per-block recon glue — **sample-type narrowing (item 1) is where the next
+  factor lives**, and it remains open.
+
+**Phase 2 — first kernel families in, default-on, honestly neutral on x86.**
+- `src/simd.rs`: 8-tap FIR row/column kernels (the MC H/V passes) and the
+  compound blends (avg / w_avg / mask), each as AVX2 + NEON + scalar twin,
+  runtime-dispatched (`simd_level()`, cached; `RUSTY_AV2D_NOSIMD=1` opts out).
+  Twin tests assert bit-equality over randomized inputs; corpus 57/57 with the
+  kernels live; aarch64 cross-compiles clean (real-ARM verification still due).
+- ABBA-alternated A/B vs the restructured scalar: **0.84–1.09× by clip,
+  medians equal** — LLVM already auto-vectorizes the cleaned slice loops, and
+  on `i32` lanes the intrinsics have no width advantage. Kept default-on
+  because they never lose beyond noise, they carry the NEON path (autovec
+  quality there unverified), and they are the skeleton the `u8`/`u16`
+  narrowing will widen into 16/32-lane wins.
+
+**What remains of the original plan:** Phase 1 item 1 (sample-type narrowing to
+`u8`/`u16` — the single biggest remaining lever, and what makes the SIMD lanes
+real), item 4 (recon-pad audit), the rest of the Phase 2 map (#4 Wiener,
+#5 CDEF, #7 deblock, #8/#9 intra), and threading.
+
+---
+
+*(Original plan follows, unchanged, for the record.)*
+
 Written 2026-08-07 against `rusty_av2d` 0.1.3.
 
 **2026-08-10 — the inherited C tree is gone too.** Separate from the assembly:

@@ -36,7 +36,6 @@ fn splat(dst: &mut [i32], stride: usize, w: usize, h: usize, v: i32) {
     for y in 0..h {
         if !crate::av2_recon::work_tick("ipred:36") { break; }
         for x in 0..w {
-            if !crate::av2_recon::work_tick("ipred:37") { break; }
             dst[y * stride + x] = v;
         }
     }
@@ -147,7 +146,6 @@ pub fn ipred_ibp_dc(
         for r in 0..h {
             if !crate::av2_recon::work_tick("ipred:145") { break; }
             for c in 0..len {
-                if !crate::av2_recon::work_tick("ipred:146") { break; }
                 dst[r * stride + c] = ibp_blend(left[r], dst[r * stride + c], wts[c]);
             }
         }
@@ -158,7 +156,6 @@ pub fn ipred_ibp_dc(
         for r in 0..len {
             if !crate::av2_recon::work_tick("ipred:154") { break; }
             for c in 0..w {
-                if !crate::av2_recon::work_tick("ipred:155") { break; }
                 dst[r * stride + c] = ibp_blend(top[c], dst[r * stride + c], wts[r]);
             }
         }
@@ -171,7 +168,6 @@ pub fn ipred_ibp_dc(
         for r in 0..len_h {
             if !crate::av2_recon::work_tick("ipred:165") { break; }
             for c in col_start..w.min(top.len()) {
-                if !crate::av2_recon::work_tick("ipred:166") { break; }
                 dst[r * stride + c] = ibp_blend(top[c], dst[r * stride + c], wts_t[r.min(wts_t.len() - 1)]);
             }
         }
@@ -180,7 +176,6 @@ pub fn ipred_ibp_dc(
         for r in row_start..h.min(left.len()) {
             if !crate::av2_recon::work_tick("ipred:172") { break; }
             for c in 0..len_w {
-                if !crate::av2_recon::work_tick("ipred:173") { break; }
                 dst[r * stride + c] = ibp_blend(left[r], dst[r * stride + c], wts_l[c]);
             }
         }
@@ -275,9 +270,7 @@ pub fn dr_z1_idif(dst: &mut [i32], stride: usize, w: usize, h: usize, above: &[i
         let shift = ((x & 0x3F) >> 1) as usize;
         if base > max_base_x {
             for rr in r..h {
-                if !crate::av2_recon::work_tick("ipred:265") { break; }
                 for c in 0..w {
-                    if !crate::av2_recon::work_tick("ipred:266") { break; }
                     dst[rr * stride + c] = ai(max_base_x);
                 }
             }
@@ -319,7 +312,6 @@ pub fn dr_z3_idif(dst: &mut [i32], stride: usize, w: usize, h: usize, left: &[i3
         let f = &DR_INTERP_FILTER[shift];
         let mut base = base0;
         for r in 0..h {
-            if !crate::av2_recon::work_tick("ipred:305") { break; }
             if base <= max_base_y {
                 dst[r * stride + c] = if chroma {
                     let v = (32 - shift as i32) * li(base) + shift as i32 * li(base + 1);
@@ -351,7 +343,6 @@ pub fn dr_z2_idif(dst: &mut [i32], stride: usize, w: usize, h: usize, above: &[i
     for r in 0..h {
         if !crate::av2_recon::work_tick("ipred:333") { break; }
         for c in 0..w {
-            if !crate::av2_recon::work_tick("ipred:334") { break; }
             let yv = (r as i32) + 1;
             let x = ((c as i32) << 6) - (yv + mrl) * dx;
             let base_x = x >> 6;
@@ -505,7 +496,6 @@ pub fn apply_dir_ibp(
                 if !crate::av2_recon::work_tick("ipred:483") { break; }
                 let ri = r >> row_shift;
                 for c in 0..w {
-                    if !crate::av2_recon::work_tick("ipred:485") { break; }
                     let ci = c >> col_shift;
                     let weight = wt[ri][ci][mode_idx];
                     dst[r * w + c] =
@@ -528,7 +518,6 @@ pub fn apply_dir_ibp(
                 if !crate::av2_recon::work_tick("ipred:504") { break; }
                 let ci = c >> col_shift;
                 for r in 0..h {
-                    if !crate::av2_recon::work_tick("ipred:506") { break; }
                     let ri = r >> row_shift;
                     let weight = wt[ci][ri][mode_idx];
                     dst[r * w + c] =
@@ -652,7 +641,6 @@ pub fn ipred_paeth(dst: &mut [i32], stride: usize, top: &[i32], left: &[i32], co
         if !crate::av2_recon::work_tick("ipred:623") { break; }
         let l = left[y];
         for x in 0..w {
-            if !crate::av2_recon::work_tick("ipred:625") { break; }
             let t = top[x];
             let base = l + t - corner;
             let ldiff = (l - base).abs();
@@ -695,7 +683,6 @@ pub fn ipred_smooth(dst: &mut [i32], stride: usize, top: &[i32], left: &[i32], w
         let off_ver = (h - 1 - y) as i32;
         let w_ver = weights[y] as i32;
         for x in 0..w {
-            if !crate::av2_recon::work_tick("ipred:666") { break; }
             let above = top[x];
             let mul_ver = (above - bottom) * off_ver;
             let mul_hor = diff_hor * (w - 1 - x) as i32;
@@ -725,7 +712,6 @@ pub fn ipred_smooth_v(dst: &mut [i32], stride: usize, top: &[i32], left: &[i32],
         let off = (h - 1 - y) as i32;
         let w_ver = weights[y] as i32;
         for x in 0..w {
-            if !crate::av2_recon::work_tick("ipred:694") { break; }
             let above = top[x];
             let mul = (above - bottom) * off;
             let pred = bottom + ((mul + rnd) >> bhl2);
@@ -749,7 +735,6 @@ pub fn ipred_smooth_h(dst: &mut [i32], stride: usize, top: &[i32], left: &[i32],
         let l = left[y];
         let diff = l - right;
         for x in 0..w {
-            if !crate::av2_recon::work_tick("ipred:716") { break; }
             let mul = diff * (w - 1 - x) as i32;
             let pred = right + ((mul + rnd) >> bwl2);
             dst[y * stride + x] = pred + (((l - pred) * weights[x.min(weights.len() - 1)] as i32 + 32) >> 6);
@@ -861,7 +846,6 @@ pub fn ipred_z1(dst: &mut [i32], stride: usize, topleft_in: &[i32], width: usize
         if !crate::av2_recon::work_tick("ipred:824") { break; }
         if (xpos >> 6) > max_base_x {
             for yy in y..height {
-                if !crate::av2_recon::work_tick("ipred:826") { break; }
                 splat_row(&mut dst[yy * stride..], width, edge);
             }
             break;
@@ -872,7 +856,6 @@ pub fn ipred_z1(dst: &mut [i32], stride: usize, topleft_in: &[i32], width: usize
             if !crate::av2_recon::work_tick("ipred:833") { break; }
             if base > max_base_x {
                 for xx in x..width {
-                    if !crate::av2_recon::work_tick("ipred:835") { break; }
                     dst[y * stride + xx] = edge;
                 }
                 break;
@@ -925,10 +908,8 @@ pub fn ipred_z3(dst: &mut [i32], stride: usize, left_in: &[i32], width: usize, h
         let f = &DR_INTERP_FILTER[((ypos & 0x3F) >> 1) as usize];
         let mut base = ypos >> 6;
         for y in 0..height {
-            if !crate::av2_recon::work_tick("ipred:885") { break; }
             if base > max_base_y {
                 for yy in y..height {
-                    if !crate::av2_recon::work_tick("ipred:887") { break; }
                     dst[yy * stride + x] = edge;
                 }
                 break;

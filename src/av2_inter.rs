@@ -79,94 +79,49 @@ pub fn mc_translate(
     rf: &Plane, dst: &mut [i32], dst_w: usize, px0: usize, py0: usize, w: usize, h: usize,
     mvy: i32, mvx: i32, filter_type: usize, ss_hor: u32, ss_ver: u32, bdmax: i32,
 ) {
+    crate::prof_scope!(3);
     if dst.len() < (h.max(1) - 1) * dst_w + w {
         crate::dlog!("[MCT-BAD] dst.len={} dst_w={dst_w} w={w} h={h} px0={px0} py0={py0} rf={}x{}", dst.len(), rf.w, rf.h);
     }
-    let (rw, rh) = (rf.w as i32, rf.h as i32);
-    let get = |x: i32, y: i32| -> i32 { rf.at(x.clamp(0, rw - 1) as usize, y.clamp(0, rh - 1) as usize) };
-    let mx = (mvx & (15 >> (1 - ss_hor))) << (1 - ss_hor);
-    let my = (mvy & (15 >> (1 - ss_ver))) << (1 - ss_ver);
-    let dx = px0 as i32 + (mvx >> (3 + ss_hor));
-    let dy = py0 as i32 + (mvy >> (3 + ss_ver));
-    const IB: i32 = 4; // intermediate_bits (8-bit)
-    const BITS: i32 = 6; // 6 + (filter_type < 0); filter_type >= 0 here
-    let fh = (mx != 0).then(|| mc_filter(mx, w, filter_type));
-    let fv = (my != 0).then(|| mc_filter(my, h, filter_type));
-    match (fh, fv) {
-        (Some(fh), Some(fv)) => {
-            let (h_sh, v_sh) = (BITS - IB, BITS + IB); // 2, 10
-            let midh = h + 7;
-            let mut mid = vec![0i32; midh * w];
-            for yy in 0..midh {
-                if !crate::av2_recon::work_tick("av2_inter:100") { break; }
-                let sy = dy - 3 + yy as i32;
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:102") { break; }
-                    let sx = dx + xx as i32;
-                    let s: i32 = (0..8).map(|k| fh[k] as i32 * get(sx + k as i32 - 3, sy)).sum();
-                    mid[yy * w + xx] = (s + ((1 << h_sh) >> 1)) >> h_sh;
-                }
-            }
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:108") { break; }
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:109") { break; }
-                    let s: i32 = (0..8).map(|k| fv[k] as i32 * mid[(yy + k) * w + xx]).sum();
-                    dst[yy * dst_w + xx] = ((s + ((1 << v_sh) >> 1)) >> v_sh).clamp(0, bdmax);
-                }
-            }
-        }
-        (Some(fh), None) => {
-            let rnd = ((1 << BITS) >> 1) + ((1 << (BITS - IB)) >> 1); // 34
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:117") { break; }
-                let sy = dy + yy as i32;
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:119") { break; }
-                    let sx = dx + xx as i32;
-                    let s: i32 = (0..8).map(|k| fh[k] as i32 * get(sx + k as i32 - 3, sy)).sum();
-                    dst[yy * dst_w + xx] = ((s + rnd) >> BITS).clamp(0, bdmax);
-                }
-            }
-        }
-        (None, Some(fv)) => {
-            let rnd = (1 << BITS) >> 1; // 32
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:128") { break; }
-                let sy = dy + yy as i32;
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:130") { break; }
-                    let sx = dx + xx as i32;
-                    let s: i32 = (0..8).map(|k| fv[k] as i32 * get(sx, sy + k as i32 - 3)).sum();
-                    dst[yy * dst_w + xx] = ((s + rnd) >> BITS).clamp(0, bdmax);
-                }
-            }
-        }
-        (None, None) => {
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:138") { break; }
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:139") { break; }
-                    let o = yy * dst_w + xx;
-                    if o >= dst.len() {
-                        continue; // HARDENING: corrupt block dims vs the caller's buffer
-                    }
-                    dst[o] = get(dx + xx as i32, dy + yy as i32);
-                }
-            }
-        }
-    }
+    mc_core(rf, dst, dst_w, px0, py0, w, h, mvy, mvx, filter_type, ss_hor, ss_ver, false, bdmax);
 }
 
 /// PREP-precision translational MC (dav2d `prep_8tap_c` + `prep_c`, mc_tmpl.c:266/64, 8-bit:
-/// intermediate_bits=4, PREP_BIAS=0): output stays at +4-bit precision, NO final clamp — the
+/// intermediate_bits=4, PREP_BIAS=0): output stays at +4-bit precision, NO final clamp -- the
 /// compound blend kernels (avg/w_avg/mask/w_mask) consume these intermediates.
 #[allow(clippy::too_many_arguments)]
 pub fn mc_translate_prep(
     rf: &Plane, dst: &mut [i32], dst_w: usize, px0: usize, py0: usize, w: usize, h: usize,
     mvy: i32, mvx: i32, filter_type: usize, ss_hor: u32, ss_ver: u32,
 ) {
+    crate::prof_scope!(3);
+    mc_core(rf, dst, dst_w, px0, py0, w, h, mvy, mvx, filter_type, ss_hor, ss_ver, true, 0);
+}
+
+thread_local! {
+    /// Reusable H-pass intermediate for the 2D MC path (docs/plan.md Phase 1: MC used to
+    /// allocate this on every one of ~40k calls per clip).
+    static MC_MID: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Shared core of `mc_translate` / `mc_translate_prep` (`prep` selects the output
+/// precision: put = final round+clamp, prep = +4-bit intermediates, no clamp).
+///
+/// Structure (docs/plan.md Phase 1): the tap window is tested against the frame
+/// once per call -- the INTERIOR case (everything a block plus its 8-tap margin
+/// touches is inside the frame, which is nearly every block) runs on direct
+/// row-indexed slices with no per-sample clamps or bounds checks, in a shape the
+/// compiler can vectorize; only genuine boundary blocks take the clamped path.
+/// Byte-exactness: both paths compute the identical arithmetic in the identical
+/// order -- the corpus gate holds byte-for-byte.
+#[allow(clippy::too_many_arguments)]
+fn mc_core(
+    rf: &Plane, dst: &mut [i32], dst_w: usize, px0: usize, py0: usize, w: usize, h: usize,
+    mvy: i32, mvx: i32, filter_type: usize, ss_hor: u32, ss_ver: u32, prep: bool, bdmax: i32,
+) {
     let (rw, rh) = (rf.w as i32, rf.h as i32);
+    let stride = rf.stride;
+    let px = &rf.px[..];
     let get = |x: i32, y: i32| -> i32 { rf.at(x.clamp(0, rw - 1) as usize, y.clamp(0, rh - 1) as usize) };
     let mx = (mvx & (15 >> (1 - ss_hor))) << (1 - ss_hor);
     let my = (mvy & (15 >> (1 - ss_ver))) << (1 - ss_ver);
@@ -176,62 +131,146 @@ pub fn mc_translate_prep(
     const BITS: i32 = 6;
     let fh = (mx != 0).then(|| mc_filter(mx, w, filter_type));
     let fv = (my != 0).then(|| mc_filter(my, h, filter_type));
+    // Interior test for the widest window any arm can touch: x in [dx-3, dx+w+3],
+    // y in [dy-3, dy+h+3]. (Arms that need less still qualify; the test is one
+    // compare per call, precision is not worth four variants.)
+    let interior = dx - 3 >= 0
+        && dy - 3 >= 0
+        && dx + w as i32 + 4 <= rw
+        && dy + h as i32 + 4 <= rh
+        && px.len() >= ((dy + h as i32 + 3) as usize) * stride + (dx + w as i32 + 4) as usize;
     match (fh, fv) {
         (Some(fh), Some(fv)) => {
             let h_sh = BITS - IB; // 2
+            let v_sh = if prep { BITS } else { BITS + IB }; // 6 / 10
             let midh = h + 7;
-            let mut mid = vec![0i32; midh * w];
-            for yy in 0..midh {
-                if !crate::av2_recon::work_tick("av2_inter:174") { break; }
-                let sy = dy - 3 + yy as i32;
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:176") { break; }
-                    let sx = dx + xx as i32;
-                    let s: i32 = (0..8).map(|k| fh[k] as i32 * get(sx + k as i32 - 3, sy)).sum();
-                    mid[yy * w + xx] = (s + ((1 << h_sh) >> 1)) >> h_sh;
+            MC_MID.with(|c| {
+                let mut mid_b = c.borrow_mut();
+                if mid_b.len() < midh * w {
+                    mid_b.resize(midh * w, 0);
                 }
-            }
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:182") { break; }
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:183") { break; }
-                    let s: i32 = (0..8).map(|k| fv[k] as i32 * mid[(yy + k) * w + xx]).sum();
-                    dst[yy * dst_w + xx] = (s + ((1 << BITS) >> 1)) >> BITS;
+                let mid = &mut mid_b[..midh * w];
+                if interior {
+                    for yy in 0..midh {
+                        let base = ((dy - 3 + yy as i32) as usize) * stride + (dx - 3) as usize;
+                        crate::simd::fir8_row(
+                            &px[base..base + w + 7],
+                            fh,
+                            &mut mid[yy * w..yy * w + w],
+                            (1 << h_sh) >> 1,
+                            h_sh,
+                            -1,
+                        );
+                    }
+                } else {
+                    for yy in 0..midh {
+                        if !crate::av2_recon::work_tick("av2_inter:mc2d_h") { break; }
+                        let sy = dy - 3 + yy as i32;
+                        for xx in 0..w {
+                            let sx = dx + xx as i32;
+                            let s: i32 = (0..8).map(|k| fh[k] as i32 * get(sx + k as i32 - 3, sy)).sum();
+                            mid[yy * w + xx] = (s + ((1 << h_sh) >> 1)) >> h_sh;
+                        }
+                    }
                 }
-            }
+                let vclamp = if prep { -1 } else { bdmax };
+                for yy in 0..h {
+                    if !crate::av2_recon::work_tick("av2_inter:mc2d_v") { break; }
+                    crate::simd::fir8_col(
+                        &mid[yy * w..(yy + 7) * w + w],
+                        w,
+                        fv,
+                        &mut dst[yy * dst_w..yy * dst_w + w],
+                        (1 << v_sh) >> 1,
+                        v_sh,
+                        vclamp,
+                    );
+                }
+            });
         }
         (Some(fh), None) => {
-            let sh = BITS - IB; // 2
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:191") { break; }
-                let sy = dy + yy as i32;
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:193") { break; }
-                    let sx = dx + xx as i32;
-                    let s: i32 = (0..8).map(|k| fh[k] as i32 * get(sx + k as i32 - 3, sy)).sum();
-                    dst[yy * dst_w + xx] = (s + ((1 << sh) >> 1)) >> sh;
+            // put: (s + 34) >> 6 clamped; prep: (s + 2) >> 2 unclamped.
+            let (sh, rnd) = if prep { (BITS - IB, (1 << (BITS - IB)) >> 1) } else { (BITS, ((1 << BITS) >> 1) + ((1 << (BITS - IB)) >> 1)) };
+            if interior {
+                let clamp = if prep { -1 } else { bdmax };
+                for yy in 0..h {
+                    let base = ((dy + yy as i32) as usize) * stride + (dx - 3) as usize;
+                    crate::simd::fir8_row(
+                        &px[base..base + w + 7],
+                        fh,
+                        &mut dst[yy * dst_w..yy * dst_w + w],
+                        rnd,
+                        sh,
+                        clamp,
+                    );
+                }
+            } else {
+                for yy in 0..h {
+                    if !crate::av2_recon::work_tick("av2_inter:mc_h") { break; }
+                    let sy = dy + yy as i32;
+                    for xx in 0..w {
+                        let sx = dx + xx as i32;
+                        let s: i32 = (0..8).map(|k| fh[k] as i32 * get(sx + k as i32 - 3, sy)).sum();
+                        let v = (s + rnd) >> sh;
+                        dst[yy * dst_w + xx] = if prep { v } else { v.clamp(0, bdmax) };
+                    }
                 }
             }
         }
         (None, Some(fv)) => {
-            let sh = BITS - IB; // 2
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:202") { break; }
-                let sy = dy + yy as i32;
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:204") { break; }
-                    let sx = dx + xx as i32;
-                    let s: i32 = (0..8).map(|k| fv[k] as i32 * get(sx, sy + k as i32 - 3)).sum();
-                    dst[yy * dst_w + xx] = (s + ((1 << sh) >> 1)) >> sh;
+            // put: (s + 32) >> 6 clamped; prep: (s + 2) >> 2 unclamped.
+            let (sh, rnd) = if prep { (BITS - IB, (1 << (BITS - IB)) >> 1) } else { (BITS, (1 << BITS) >> 1) };
+            if interior {
+                let clamp = if prep { -1 } else { bdmax };
+                for yy in 0..h {
+                    let base = ((dy - 3 + yy as i32) as usize) * stride + dx as usize;
+                    crate::simd::fir8_col(
+                        &px[base..base + 7 * stride + w],
+                        stride,
+                        fv,
+                        &mut dst[yy * dst_w..yy * dst_w + w],
+                        rnd,
+                        sh,
+                        clamp,
+                    );
+                }
+            } else {
+                for yy in 0..h {
+                    if !crate::av2_recon::work_tick("av2_inter:mc_v") { break; }
+                    let sy = dy + yy as i32;
+                    for xx in 0..w {
+                        let sx = dx + xx as i32;
+                        let s: i32 = (0..8).map(|k| fv[k] as i32 * get(sx, sy + k as i32 - 3)).sum();
+                        let v = (s + rnd) >> sh;
+                        dst[yy * dst_w + xx] = if prep { v } else { v.clamp(0, bdmax) };
+                    }
                 }
             }
         }
         (None, None) => {
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:212") { break; }
-                for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:213") { break; }
-                    dst[yy * dst_w + xx] = get(dx + xx as i32, dy + yy as i32) << IB;
+            if interior {
+                for yy in 0..h {
+                    let base = ((dy + yy as i32) as usize) * stride + dx as usize;
+                    let drow = &mut dst[yy * dst_w..yy * dst_w + w];
+                    if prep {
+                        for (xx, d) in drow.iter_mut().enumerate() {
+                            *d = px[base + xx] << IB;
+                        }
+                    } else {
+                        drow[..w].copy_from_slice(&px[base..base + w]);
+                    }
+                }
+            } else {
+                for yy in 0..h {
+                    if !crate::av2_recon::work_tick("av2_inter:mc_copy") { break; }
+                    for xx in 0..w {
+                        let o = yy * dst_w + xx;
+                        if o >= dst.len() {
+                            continue; // HARDENING: corrupt block dims vs the caller's buffer
+                        }
+                        let v = get(dx + xx as i32, dy + yy as i32);
+                        dst[o] = if prep { v << IB } else { v };
+                    }
                 }
             }
         }
@@ -242,10 +281,7 @@ pub fn mc_translate_prep(
 pub fn comp_avg(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize, h: usize, bdmax: i32) {
     for y in 0..h {
         if !crate::av2_recon::work_tick("av2_inter:223") { break; }
-        for x in 0..w {
-            if !crate::av2_recon::work_tick("av2_inter:224") { break; }
-            dst[y * dst_w + x] = ((t1[y * w + x] + t2[y * w + x] + 16) >> 5).clamp(0, bdmax);
-        }
+        crate::simd::avg_row(&t1[y * w..y * w + w], &t2[y * w..y * w + w], &mut dst[y * dst_w..y * dst_w + w], bdmax);
     }
 }
 
@@ -253,10 +289,7 @@ pub fn comp_avg(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize,
 pub fn comp_w_avg(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize, h: usize, wt: i32, bdmax: i32) {
     for y in 0..h {
         if !crate::av2_recon::work_tick("av2_inter:232") { break; }
-        for x in 0..w {
-            if !crate::av2_recon::work_tick("av2_inter:233") { break; }
-            dst[y * dst_w + x] = ((t1[y * w + x] * wt + t2[y * w + x] * (16 - wt) + 128) >> 8).clamp(0, bdmax);
-        }
+        crate::simd::w_avg_row(&t1[y * w..y * w + w], &t2[y * w..y * w + w], &mut dst[y * dst_w..y * dst_w + w], wt, bdmax);
     }
 }
 
@@ -264,11 +297,7 @@ pub fn comp_w_avg(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usiz
 pub fn comp_mask(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize, h: usize, mask: &[u8], bdmax: i32) {
     for y in 0..h {
         if !crate::av2_recon::work_tick("av2_inter:241") { break; }
-        for x in 0..w {
-            if !crate::av2_recon::work_tick("av2_inter:242") { break; }
-            let m = mask[y * w + x] as i32;
-            dst[y * dst_w + x] = ((t1[y * w + x] * m + t2[y * w + x] * (64 - m) + 512) >> 10).clamp(0, bdmax);
-        }
+        crate::simd::mask_row(&t1[y * w..y * w + w], &t2[y * w..y * w + w], &mask[y * w..y * w + w], &mut dst[y * dst_w..y * dst_w + w], bdmax);
     }
 }
 
@@ -290,7 +319,6 @@ pub fn comp_w_mask_ss(
         if !crate::av2_recon::work_tick("av2_inter:263") { break; }
         let mut x = 0usize;
         while x < w {
-            if !crate::av2_recon::work_tick("av2_inter:265") { break; }
             let d = t1[y * w + x] - t2[y * w + x];
             let m = (38 + ((d.abs() + MASK_RND) >> MASK_SH)).min(64);
             dst[y * dst_w + x] = ((d * m + t2[y * w + x] * 64 + 512) >> 10).clamp(0, bdmax);
@@ -328,7 +356,6 @@ pub fn bacp_mask(
     for y in 0..bh {
         if !crate::av2_recon::work_tick("av2_inter:301") { break; }
         for x in 0..bw {
-            if !crate::av2_recon::work_tick("av2_inter:302") { break; }
             let p0 = (x0 + x as i32) >= 0 && (x0 + (x as i32)) < fw && (y0 + y as i32) >= 0 && (y0 + y as i32) < fh;
             let p1 = (x1 + x as i32) >= 0 && (x1 + (x as i32)) < fw && (y1 + y as i32) >= 0 && (y1 + y as i32) < fh;
             mask[y * stride + x] = (32 * (p0 as i32 - p1 as i32 + 1)) as u8;
@@ -366,7 +393,6 @@ pub fn put_bilin_win(
         for yy in 0..h + 1 {
             if !crate::av2_recon::work_tick("av2_inter:337") { break; }
             for xx in 0..w {
-                if !crate::av2_recon::work_tick("av2_inter:338") { break; }
                 let (sx, sy) = (dx + xx as i32, dy + yy as i32);
                 mid[yy * w + xx] = bil(wget(rf, sx, sy, l, r, t, b), wget(rf, sx + 1, sy, l, r, t, b), mx);
             }
@@ -374,7 +400,6 @@ pub fn put_bilin_win(
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:343") { break; }
             for xx in 0..w {
-                if !crate::av2_recon::work_tick("av2_inter:344") { break; }
                 let v = bil(mid[yy * w + xx], mid[(yy + 1) * w + xx], my);
                 dst[yy * dstride + xx] = ((v + 128) >> 8).clamp(0, bdmax);
             }
@@ -383,7 +408,6 @@ pub fn put_bilin_win(
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:350") { break; }
             for xx in 0..w {
-                if !crate::av2_recon::work_tick("av2_inter:351") { break; }
                 let (sx, sy) = (dx + xx as i32, dy + yy as i32);
                 let px = bil(wget(rf, sx, sy, l, r, t, b), wget(rf, sx + 1, sy, l, r, t, b), mx);
                 dst[yy * dstride + xx] = ((px + 8) >> 4).clamp(0, bdmax);
@@ -393,7 +417,6 @@ pub fn put_bilin_win(
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:358") { break; }
             for xx in 0..w {
-                if !crate::av2_recon::work_tick("av2_inter:359") { break; }
                 let (sx, sy) = (dx + xx as i32, dy + yy as i32);
                 let v = bil(wget(rf, sx, sy, l, r, t, b), wget(rf, sx, sy + 1, l, r, t, b), my);
                 dst[yy * dstride + xx] = ((v + 8) >> 4).clamp(0, bdmax);
@@ -403,7 +426,6 @@ pub fn put_bilin_win(
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:366") { break; }
             for xx in 0..w {
-                if !crate::av2_recon::work_tick("av2_inter:367") { break; }
                 dst[yy * dstride + xx] = wget(rf, dx + xx as i32, dy + yy as i32, l, r, t, b);
             }
         }
@@ -437,7 +459,6 @@ pub fn prep_opfl(
                 if !crate::av2_recon::work_tick("av2_inter:397") { break; }
                 let sy = dy - 3 + yy as i32;
                 for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:399") { break; }
                     let sx = dx + xx as i32;
                     let s: i32 = (0..8).map(|k| fh[k] as i32 * wget(rf, sx + k as i32 - 3, sy, l, r, t, b)).sum();
                     mid[yy * w + xx] = (s + ((1 << h_sh) >> 1)) >> h_sh;
@@ -446,7 +467,6 @@ pub fn prep_opfl(
             for yy in 0..h {
                 if !crate::av2_recon::work_tick("av2_inter:405") { break; }
                 for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:406") { break; }
                     let s: i32 = (0..8).map(|k| fv[k] as i32 * mid[(yy + k) * w + xx]).sum();
                     dst[yy * dstride + xx] = (s + ((1 << BITS) >> 1)) >> BITS;
                 }
@@ -458,7 +478,6 @@ pub fn prep_opfl(
                 if !crate::av2_recon::work_tick("av2_inter:414") { break; }
                 let sy = dy + yy as i32;
                 for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:416") { break; }
                     let sx = dx + xx as i32;
                     let s: i32 = (0..8).map(|k| fh[k] as i32 * wget(rf, sx + k as i32 - 3, sy, l, r, t, b)).sum();
                     dst[yy * dstride + xx] = (s + ((1 << sh) >> 1)) >> sh;
@@ -470,7 +489,6 @@ pub fn prep_opfl(
             for yy in 0..h {
                 if !crate::av2_recon::work_tick("av2_inter:425") { break; }
                 for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:426") { break; }
                     let sx = dx + xx as i32;
                     let s: i32 = (0..8).map(|k| fv[k] as i32 * wget(rf, sx, dy + yy as i32 + k as i32 - 3, l, r, t, b)).sum();
                     dst[yy * dstride + xx] = (s + ((1 << sh) >> 1)) >> sh;
@@ -481,7 +499,6 @@ pub fn prep_opfl(
             for yy in 0..h {
                 if !crate::av2_recon::work_tick("av2_inter:434") { break; }
                 for xx in 0..w {
-                    if !crate::av2_recon::work_tick("av2_inter:435") { break; }
                     dst[yy * dstride + xx] = wget(rf, dx + xx as i32, dy + yy as i32, l, r, t, b) << IB;
                 }
             }
@@ -496,7 +513,6 @@ fn sad_nxn(p0: &[i32], s0: usize, p1: &[i32], s1: usize, w: usize, h: usize) -> 
     while y < h {
         if !crate::av2_recon::work_tick("av2_inter:446") { break; }
         for x in 0..w {
-            if !crate::av2_recon::work_tick("av2_inter:449") { break; }
             sad += (p0[y * s0 + x] - p1[y * s1 + x]).unsigned_abs();
         }
         y += 2;
@@ -529,7 +545,6 @@ pub fn sad_refine_mv(p0: &[i32], s0: usize, p1: &[i32], s1: usize, w: usize, h: 
     for y_off in -2i32..=2 {
         if !crate::av2_recon::work_tick("av2_inter:479") { break; }
         for x_off in -2i32..=2 {
-            if !crate::av2_recon::work_tick("av2_inter:480") { break; }
             if x_off == 0 && y_off == 0 {
                 continue;
             }
@@ -585,7 +600,6 @@ pub fn opfl_derive_mv(
     for y in 0..h {
         if !crate::av2_recon::work_tick("av2_inter:533") { break; }
         for x in 0..w {
-            if !crate::av2_recon::work_tick("av2_inter:534") { break; }
             let p0p = p0[y * s0 + x];
             let p1p = p1[y * s1 + x];
             let v = d.0 * p0p + d.1 * p1p;
@@ -608,9 +622,7 @@ pub fn opfl_derive_mv(
         let max_x = x_end as i32 - 1;
         let (min_y, max_y) = (0i32, h as i32 - 1);
         for y in 0..h as i32 {
-            if !crate::av2_recon::work_tick("av2_inter:556") { break; }
             for x in bx as i32..x_end as i32 {
-                if !crate::av2_recon::work_tick("av2_inter:557") { break; }
                 let p0v = tmp0[(y * 64 + (x - 2).max(min_x)) as usize];
                 let p1v = tmp0[(y * 64 + (x - 1).max(min_x)) as usize];
                 let p2v = tmp0[(y * 64 + (x + 1).min(max_x)) as usize];
@@ -635,12 +647,9 @@ pub fn opfl_derive_mv(
         if !crate::av2_recon::work_tick("av2_inter:575") { break; }
         let mut x = 0usize;
         while x < w {
-            if !crate::av2_recon::work_tick("av2_inter:577") { break; }
             let mut r = OpflReg { su2: (bs * bs) as i32, sv2: (bs * bs) as i32, ..Default::default() };
             for py in y..y + bs {
-                if !crate::av2_recon::work_tick("av2_inter:584") { break; }
                 for px in x..x + bs {
-                    if !crate::av2_recon::work_tick("av2_inter:585") { break; }
                     let u = gx0[py * 64 + px];
                     let v = gy0[py * 64 + px];
                     let wv = tmp1[py * 64 + px];

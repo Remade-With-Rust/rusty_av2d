@@ -107,7 +107,6 @@ pub fn cdef_filter_block(dst: &mut [i32], dst_stride: usize, tmp: &[i32], pri_st
     for y in 0..h {
         if !crate::av2_recon::work_tick("filter:107") { break; }
         for x in 0..w {
-            if !crate::av2_recon::work_tick("filter:108") { break; }
             let c = origin + y as i32 * s + x as i32;
             let px = tmp[c as usize];
             let mut sum = 0i32;
@@ -162,7 +161,6 @@ pub fn cdef_find_dir(img: &[i32], origin: usize, stride: usize, bitdepth_max: i3
     for y in 0..8usize {
         if !crate::av2_recon::work_tick("filter:160") { break; }
         for x in 0..8usize {
-            if !crate::av2_recon::work_tick("filter:161") { break; }
             // HARDENING: a corrupt stream can place the CDEF direction window past the plane
             // (the 8x8 block origin is derived from block geometry) — read 0 outside it.
             let px = (img.get(origin + y * stride + x).copied().unwrap_or(0) >> bd_min8) - 128;
@@ -252,6 +250,7 @@ pub fn cdef_block(
     have_right: bool,
     bitdepth_max: i32,
 ) {
+    crate::prof_scope!(7);
     const TS: isize = CDEF_TMP_STRIDE as isize;
     let mut tmp = [CDEF_VERY_LARGE; CDEF_TMP_STRIDE * 12];
     let y_start: isize = if have_top { -2 } else { 0 };
@@ -263,7 +262,6 @@ pub fn cdef_block(
     for dy in y_start..y_end {
         if !crate::av2_recon::work_tick("filter:258") { break; }
         for dx in x_start..x_end {
-            if !crate::av2_recon::work_tick("filter:259") { break; }
             let src = (in_off as isize + dy * ins + dx) as usize;
             let ti = (base + dy * TS + dx) as usize;
             // HARDENING: corrupt geometry can push the CDEF source window past the plane

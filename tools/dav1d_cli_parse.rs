@@ -20,13 +20,8 @@ use rusty_av2d::include::dav1d::dav1d::{
 };
 use rusty_av2d::{dav1d_default_settings, dav1d_version};
 
-use crate::compat::getopt::{getopt_long, option};
+use crate::compat::getopt::{getopt_long, optarg, optind, option};
 use crate::compat::stdio::stderr;
-
-extern "C" {
-    static mut optarg: *mut c_char;
-    static mut optind: c_int;
-}
 
 // TODO(kkysen) These are used in `dav1d.rs` and `seek_stress.rs`
 // but are still marked as unused since `[[bin]]` are only supposed to be one file in `cargo`.

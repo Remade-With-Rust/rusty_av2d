@@ -140,6 +140,8 @@ mod cdf;
 mod cdf_av2;
 mod const_fn;
 pub mod cpu;
+pub mod prof;
+pub mod simd;
 mod ctx;
 mod cursor;
 mod data;

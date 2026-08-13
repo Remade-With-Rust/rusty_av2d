@@ -2070,6 +2070,7 @@ pub fn decode_sb_key(
     bx4: usize,
     by4: usize,
 ) {
+    crate::prof_scope!(0);
     use crate::av2_decode::{decode_partition, splat_partition, BlockPartition, BLOCK_DIMENSIONS, PART_HALF};
     if bs >= 6 {
         // SDP fork at the 64x64 boundary: fresh dir accumulator, luma then chroma.
@@ -2563,6 +2564,7 @@ fn decode_chroma_coefs(
     // 2D); INTER chroma INHERITS it (dav2d recon 3643/3657), clamped, so the class may be H/V.
     luma_txtp: u8,
 ) -> ChromaCoefs {
+    crate::prof_scope!(1);
     if std::env::var("HANGCP").is_ok() { crate::dlog!("[CP]   chroma-coefs enter"); }
     let bd = crate::av2_decode::BLOCK_DIMENSIONS[bs];
     let (ssh, ssv) = ss_g();
@@ -5479,6 +5481,7 @@ pub fn decode_sb_inter(
     left_cdef: &mut i8,
     left_ccso: &mut [u8; 3],
 ) {
+    crate::prof_scope!(0);
     use crate::av2_decode::{decode_partition, splat_partition, BlockPartition, BLOCK_DIMENSIONS, PART_HALF};
     use crate::msac::rav1d_msac_decode_bool_adapt;
     let bd = BLOCK_DIMENSIONS[bs];
@@ -7773,6 +7776,7 @@ pub fn decode_coefs_y(
     tcq_enabled: bool,
     dc_sign_ctx: usize,
 ) -> (u8, u8, u8, u8) {
+    crate::prof_scope!(1);
     use crate::msac::{
         rav1d_msac_decode_bool_adapt, rav1d_msac_decode_symbol_adapt4,
         rav1d_msac_decode_symbol_adapt8,

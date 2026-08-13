@@ -207,7 +207,6 @@ fn inv_dst_1d(c: &mut [i32], stride: usize, mat: &[i8], n: usize, flip: bool) {
         if !crate::av2_recon::work_tick("av2_itx:204") { break; }
         let mut sum = 0i32;
         for j in 0..n {
-            if !crate::av2_recon::work_tick("av2_itx:206") { break; }
             sum += mat[m] as i32 * c[j * stride];
             m += 1;
         }
@@ -329,6 +328,7 @@ const TX_SHIFT: [[[u32; 2]; 5]; 5] = [
 /// `i32` residual (row-major, pre clip/add) to `out`. Bit-exact core of dav2d
 /// `inv_txfm_add_c`.
 pub fn inv_txfm_2d(coeff: &[i32], lw: usize, lh: usize, row_ty: usize, col_ty: usize, out: &mut [i32]) {
+    crate::prof_scope!(4);
     let w = 4usize << lw;
     let h = 4usize << lh;
     let sw = w.min(32);
@@ -347,7 +347,6 @@ pub fn inv_txfm_2d(coeff: &[i32], lw: usize, lh: usize, row_ty: usize, col_ty: u
         if !crate::av2_recon::work_tick("av2_itx:341") { break; }
         let base = col * sw;
         for x in 0..sw {
-            if !crate::av2_recon::work_tick("av2_itx:343") { break; }
             let v = coeff[col + x * sh];
             tmp[base + x] = if is_rect2 { (v * 181 + 128) >> 8 } else { v };
         }
@@ -378,12 +377,9 @@ pub fn inv_txfm_2d(coeff: &[i32], lw: usize, lh: usize, row_ty: usize, col_ty: u
     for sy in 0..sh {
         if !crate::av2_recon::work_tick("av2_itx:369") { break; }
         for sx in 0..sw {
-            if !crate::av2_recon::work_tick("av2_itx:370") { break; }
             let cf = (tmp[sy * sw + sx] + rnd1) >> shift1;
             for dy in 0..=yr {
-                if !crate::av2_recon::work_tick("av2_itx:372") { break; }
                 for dx in 0..=xr {
-                    if !crate::av2_recon::work_tick("av2_itx:373") { break; }
                     out[((sy << yr) + dy) * w + (sx << xr) + dx] = cf;
                 }
             }
@@ -469,7 +465,6 @@ pub fn residual_add(dst: &mut [i32], stride: usize, c: &[i32], w: usize, h: usiz
             for y in 0..h {
                 if !crate::av2_recon::work_tick("av2_itx:455") { break; }
                 for x in 0..w {
-                    if !crate::av2_recon::work_tick("av2_itx:456") { break; }
                     let o = y * stride + x;
                     dst[o] = clip(dst[o] + ((c[y * w + x] + rnd) >> shift));
                 }
@@ -480,7 +475,6 @@ pub fn residual_add(dst: &mut [i32], stride: usize, c: &[i32], w: usize, h: usiz
                 if !crate::av2_recon::work_tick("av2_itx:463") { break; }
                 let mut acc = 0;
                 for x in 0..w {
-                    if !crate::av2_recon::work_tick("av2_itx:465") { break; }
                     acc += (c[y * w + x] + rnd) >> shift;
                     let o = y * stride + x;
                     dst[o] = clip(dst[o] + acc);
@@ -492,7 +486,6 @@ pub fn residual_add(dst: &mut [i32], stride: usize, c: &[i32], w: usize, h: usiz
                 if !crate::av2_recon::work_tick("av2_itx:473") { break; }
                 let mut acc = 0;
                 for y in 0..h {
-                    if !crate::av2_recon::work_tick("av2_itx:475") { break; }
                     acc += (c[y * w + x] + rnd) >> shift;
                     let o = y * stride + x;
                     dst[o] = clip(dst[o] + acc);

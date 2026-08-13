@@ -1079,6 +1079,7 @@ pub fn dbg_block_miss_c(px0: usize, py0: usize, w: usize, h: usize, tag: &str) {
 /// so a later block's intra gather over `RECON_PAD` reads real off-frame recon. No-op if the pad
 /// isn't allocated. Safe to call while `FRAME` is borrowed (touches only `RECON_PAD`).
 pub fn write_recon_pad(plane: usize, px0: usize, py0: usize, pred: &[i32], w: usize, h: usize) {
+    crate::prof_scope!(5);
     RECON_PAD.with(|p| {
         let mut pad = p.borrow_mut();
         if plane >= pad.len() { return; }

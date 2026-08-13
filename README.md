@@ -152,12 +152,15 @@ These are real, and you should read them before building on this.
 1. **AV2 is not a finalized standard.** There are no official conformance
    vectors. "Correct" here means bit-exact against AVM as of this commit — the
    bitstream itself may still change under us.
-2. **Performance is unoptimized.** Correctness was the only goal. The decoder
-   is **fully scalar** — no SIMD and no assembly. Samples are stored
-   one-per-`i32` with a bounds check on every read, which costs motion
-   compensation roughly 20× what the arithmetic alone would. Do not benchmark
-   this against `libavm` and expect a fair fight.
-   [`docs/plan.md`](docs/plan.md) has the profile and the plan to fix it.
+2. **Performance is young.** Correctness came first. The hot paths now run
+   restructured slice loops with an interior/edge split (motion compensation
+   measured 19–47% faster whole-decode from that alone) plus runtime-dispatched
+   AVX2/NEON kernels for the MC taps and compound blends — byte-identical,
+   scalar-twin-tested, `RUSTY_AV2D_NOSIMD=1` opts out. Samples are still
+   one-per-`i32`, which caps the vector width; the narrowing to `u8`/`u16` is
+   the next planned lever. Do not benchmark this against `libavm` and expect a
+   fair fight yet. [`docs/plan.md`](docs/plan.md) has the measured profile and
+   what remains.
 3. **Research-grade internals.** The AV2 path uses thread-local state rather
    than the upstream pipeline structure, and retains in-tree diagnostic probes
    (silent unless `RUSTY_AV2D_DEBUG=1`).

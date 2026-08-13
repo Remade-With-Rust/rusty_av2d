@@ -150,7 +150,6 @@ fn set_lap_and_cls(
             let j01 = j00 + 1;
             let r = (row as usize) * lap_y_stride;
             for d in 0..INP_GRD_NUM {
-                if !crate::av2_recon::work_tick("gdf:150") { break; }
                 let g = grad(sp, j0, d);
                 lap[d][r + j01] = g;
                 lap[d][r + j00] = lap[d][r + j00].wrapping_add(g);
@@ -172,7 +171,6 @@ fn set_lap_and_cls(
         let clr = (cls_row.max(0) as usize) * cls_stride;
         if i == 0 {
             for d in 0..INP_GRD_NUM {
-                if !crate::av2_recon::work_tick("gdf:170") { break; }
                 lap[d][cr] = lap[d][cr].wrapping_add(grad(sp, 0, d));
             }
             let mut j0 = 2i32;
@@ -181,7 +179,6 @@ fn set_lap_and_cls(
                 let j01 = j00 + 1;
                 let g: [u32; 4] = [grad(sp, j0, VER), grad(sp, j0, HOR), grad(sp, j0, DIAG0), grad(sp, j0, DIAG1)];
                 for d in 0..INP_GRD_NUM {
-                    if !crate::av2_recon::work_tick("gdf:178") { break; }
                     lap[d][cr + j00] = lap[d][cr + j00].wrapping_add(g[d]);
                     lap[d][cr + j01] = lap[d][cr + j01].wrapping_add(g[d]);
                     lap[d][cr + j00] &= clip_mask;
@@ -205,7 +202,6 @@ fn set_lap_and_cls(
                 let j00 = ((j0 - 2) >> 1) as usize;
                 let j01 = j00 + 1;
                 for d in 0..INP_GRD_NUM {
-                    if !crate::av2_recon::work_tick("gdf:199") { break; }
                     let g = grad(sp, j0, d);
                     lap[d][ar + j01] = g;
                     lap[d][ar + j00] = lap[d][ar + j00].wrapping_add(g);
@@ -275,7 +271,6 @@ fn inference(
     for idx in 0..LUT_IDX_NUM {
         if !crate::av2_recon::work_tick("gdf:265") { break; }
         for _ in 0..(LUT_IDX_NUM - 1 - idx) {
-            if !crate::av2_recon::work_tick("gdf:266") { break; }
             idx_offset[idx] *= gdf_frm_max;
         }
     }
@@ -290,14 +285,12 @@ fn inference(
         // gdf_idx[j][idx]
         let mut gdf_idx = vec![[0i32; LUT_IDX_NUM]; blk_width];
         for k in 0..INP_TOT {
-            if !crate::av2_recon::work_tick("gdf:279") { break; }
             let (fy, fx, by, bx) = if k < INP_REC_NUM {
                 (FWD[k][0], FWD[k][1], BWD[k][0], BWD[k][1])
             } else {
                 (0, 0, 0, 0)
             };
             for j in 0..blk_width {
-                if !crate::av2_recon::work_tick("gdf:285") { break; }
                 let cls_idx = cls[cls_col_row + (j >> 1)] as usize;
                 let cls_offset = k * CLS_NUM + cls_idx;
                 let center = rec[(rec_ptr + j as isize) as usize];
@@ -324,7 +317,6 @@ fn inference(
                 if k == INP_TOT - 1 {
                     let mut tb = 0i32; // offset into gdftable
                     for idx in 0..LUT_IDX_NUM {
-                        if !crate::av2_recon::work_tick("gdf:310") { break; }
                         gdf_idx[j][idx] += bias[cls_idx + CLS_NUM * idx];
                         let ti = norm(gdf_idx[j][idx]);
                         tb += clip(ti, 0, gdf_frm_max - 1) * idx_offset[idx];
@@ -362,7 +354,6 @@ fn compensation(
     for i in 0..blk_height {
         if !crate::av2_recon::work_tick("gdf:345") { break; }
         for j in 0..blk_width {
-            if !crate::av2_recon::work_tick("gdf:346") { break; }
             let mut res = (scale * err[i * err_stride + j]) as i16 as i32; // C truncates to int16_t
             res = if res > 0 { (res + half) >> err_shift } else { -(((-res) + half) >> err_shift) };
             let o = obase + i * ostride + j;
@@ -386,7 +377,6 @@ fn build_guided(luma: &[i32], w: usize, h: usize) -> (Vec<i32>, usize, usize) {
     for y in 0..h {
         if !crate::av2_recon::work_tick("gdf:367") { break; }
         for x in 0..w {
-            if !crate::av2_recon::work_tick("gdf:368") { break; }
             inp[origin + y * inp_stride + x] = luma[y * w + x];
         }
     }
@@ -397,7 +387,6 @@ fn build_guided(luma: &[i32], w: usize, h: usize) -> (Vec<i32>, usize, usize) {
         let left = inp[r];
         let right = inp[r + w - 1];
         for b in 1..=HOR_BORDER {
-            if !crate::av2_recon::work_tick("gdf:377") { break; }
             inp[r - b] = left;
             inp[r + w - 1 + b] = right;
         }
@@ -410,7 +399,6 @@ fn build_guided(luma: &[i32], w: usize, h: usize) -> (Vec<i32>, usize, usize) {
         let dstb = origin + (h - 1 + b) * inp_stride - HOR_BORDER;
         let srcb = origin + (h - 1) * inp_stride - HOR_BORDER;
         for x in 0..(w + 2 * HOR_BORDER) {
-            if !crate::av2_recon::work_tick("gdf:388") { break; }
             inp[dstt + x] = inp[src + x];
             inp[dstb + x] = inp[srcb + x];
         }
@@ -438,6 +426,7 @@ pub fn gdf_filter_frame(
     // 0 = intra frame; 1..=5 = inter (avm gdf_get_ref_dst_idx: frame-2 single-ref dist-1 → 1).
     ref_dst_idx: usize,
 ) {
+    crate::prof_scope!(9);
     let pxl_max = (1 << bit_depth) - 1;
     let pxl_shift = GDF_TEST_INP_PREC - bit_depth.min(GDF_TEST_INP_PREC);
     let err_shift = 2 /*GDF_RDO_SCALE_NUM_LOG2*/ + GDF_TEST_INP_PREC - bit_depth;
@@ -485,7 +474,6 @@ pub fn gdf_filter_frame(
         for &dst_row in rows {
             let base = (origin as isize + dst_row as isize * inp_stride as isize) as usize - HOR_BORDER;
             for x in 0..(w + 2 * HOR_BORDER) {
-                if !crate::av2_recon::work_tick("gdf:459") { break; }
                 inp[base + x] = save[k];
                 k += 1;
             }

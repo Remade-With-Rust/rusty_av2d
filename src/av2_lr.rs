@@ -190,6 +190,7 @@ pub fn lr_filter_luma(
     lr_noskip: &[bool],
     iw4: usize,
 ) {
+    crate::prof_scope!(8);
     let cfg = LR_CFG.with(|c| c.borrow().clone());
     let pd = &cfg.p[0];
     if pd.r_type == REST_NONE {
@@ -407,6 +408,7 @@ pub fn lr_filter_chroma(
     ds_type: u8,
     bdmax: i32,
 ) {
+    crate::prof_scope!(8);
     let cfg = LR_CFG.with(|c| c.borrow().clone());
     let pd = &cfg.p[p];
     if pd.r_type == REST_NONE {

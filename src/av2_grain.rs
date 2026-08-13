@@ -653,6 +653,7 @@ pub fn add_film_grain(
 
 /// Resolve (id, seed) via FGM_TABLE and apply grain to the three planes in place.
 pub fn apply_grain_to_planes(planes: &mut [crate::av2_frame::Plane; 3], id: u8, seed: u16) {
+    crate::prof_scope!(10);
     let params = FGM_TABLE.with(|t| t.borrow()[id as usize].clone());
     let Some(params) = params else { return };
     let (w, h) = (planes[0].w, planes[0].h);

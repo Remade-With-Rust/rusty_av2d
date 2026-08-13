@@ -40,12 +40,6 @@ fn main() {
             }
         }
 
-        let getopt = "getopt";
-        cc::Build::new()
-            .files([&"../tools/compat/getopt.c"])
-            .include("../src/include/compat")
-            .debug(cfg!(debug_assertions))
-            .compile(&getopt);
         // cc automatically outputs the following line
         // println!("cargo:rustc-link-lib=static={getopt}");
     }
