@@ -60,6 +60,8 @@ honored in *both* directions.
 rusty_av2d = "0.1"
 ```
 
+https://crates.io/crates/rusty_av2d
+
 Requires Rust 1.79+. No `nasm`, no C toolchain, no build-time codegen — the
 crate is pure Rust and builds with cargo alone.
 
