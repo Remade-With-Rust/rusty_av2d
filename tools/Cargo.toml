@@ -24,7 +24,7 @@ name = "seek_stress"
 rusty_alloc-api = "=1.1.4"
 cfg-if = "1.0.0"
 libc = "0.2"
-rusty_av2d = { path = "../", version = "0.2.2", default-features = false, features = ["capi"] }
+rusty_av2d = { path = "../", version = "0.2.9", default-features = false, features = ["capi"] }
 
 [build-dependencies]
 cc = "1.0.79"
