@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.2.10...rusty_av2d-v0.2.11) - 2026-09-10
+
+### Other
+
+- update rusty_av2d version to 0.2 in README
+- 532 active installs
+
 ## [0.2.10](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.2.9...rusty_av2d-v0.2.10) - 2026-08-28
 
 ### Other
