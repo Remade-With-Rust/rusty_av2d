@@ -61,7 +61,7 @@ honored in *both* directions.
 
 ```toml
 [dependencies]
-rusty_av2d = "0.1"
+rusty_av2d = "0.2"
 ```
 
 https://crates.io/crates/rusty_av2d
@@ -144,7 +144,7 @@ Those symbol names are inherited from the dav1d lineage, which means they
 features off:
 
 ```toml
-rusty_av2d = { version = "0.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+rusty_av2d = { version = "0.2", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 ```
 
 That drops the C ABI, leaving no unmangled symbols. The safe Rust API is unaffected either way — this is exactly how
