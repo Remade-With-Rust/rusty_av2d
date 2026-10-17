@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.13](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.2.12...rusty_av2d-v0.2.13) - 2026-10-17
+
+### Other
+
+- bump rusty_alloc-api to =2.2.6 ([#12](https://github.com/Remade-With-Rust/rusty_av2d/pull/12))
+- Merge pull request #7 from Remade-With-Rust/chore/release-plz-0-5-139
+
 ## [0.2.12](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.2.11...rusty_av2d-v0.2.12) - 2026-10-16
 
 ### Fixed
