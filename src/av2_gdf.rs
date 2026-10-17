@@ -546,7 +546,11 @@ pub fn gdf_filter_frame(
                     v.iter_mut().for_each(|x| *x = 0);
                 }
                 cls.iter_mut().for_each(|x| *x = 0);
-                let base = origin + (i_min - 1) * inp_stride + (j_min - 1);
+                // One row up and one column left of (i_min, j_min). On the first stripe and
+                // the first column i_min/j_min are 0, so `(i_min - 1)` would underflow usize;
+                // add before subtracting instead (`origin` >= inp_stride + 1 by construction,
+                // see `build_guided`). Same address the C reference's negative offset yields.
+                let base = origin + i_min * inp_stride + j_min - inp_stride - 1;
                 set_lap_and_cls(bh, bw, &inp, base, inp_stride, bit_depth, &mut lap, lap_y_stride, &mut cls, cls_stride);
                 let recbase = origin + i_min * inp_stride + j_min;
                 inference(bh, bw, qp_idx, &inp, recbase, inp_stride, &lap, lap_y_stride, lap_cls_height, &cls, cls_stride, &mut err, err_stride, pxl_shift, ref_dst_idx);
