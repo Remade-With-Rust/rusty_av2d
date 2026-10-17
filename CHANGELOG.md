@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.12](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.2.11...rusty_av2d-v0.2.12) - 2026-10-16
+
+### Fixed
+
+- compute the GDF stripe base without a usize underflow — debug builds panicked ("attempt to subtract with overflow", `av2_gdf.rs:549`) on the first stripe of every GDF frame, valid streams included; release output was already correct and is unchanged
+
 ## [0.2.11](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.2.10...rusty_av2d-v0.2.11) - 2026-10-08
 
 ### Other
