@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "rusty_av2d"
-version = "0.2.13"
+version = "0.2.14"
 dependencies = [
  "assert_matches",
  "atomig",
