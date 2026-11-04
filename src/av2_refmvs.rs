@@ -2500,20 +2500,26 @@ impl RefmvBank {
             let to = if sz == 4 { (idx + 3) & 3 } else { sz - 1 };
             let from = (idx + n) & 3;
             if from != to {
-                let bak = (self.mv[c][from], self.ref_pair[from]);
+                // Class 8 is shared with compound pairs, so a whole slot moves (dav2d refmvs.c:1252).
+                let bak = (self.mv[c][from], self.ref_pair[from], self.mv2[c][from]);
+                let bak_cwp = if c == 8 { self.cwp[2][from] } else { 8 };
                 let mut n1 = from;
                 let mut n2 = (n1 + 1) & 3;
                 while n1 != to {
                     self.mv[c][n1] = self.mv[c][n2];
+                    self.mv2[c][n1] = self.mv2[c][n2];
                     if c == 8 {
                         self.ref_pair[n1] = self.ref_pair[n2];
+                        self.cwp[2][n1] = self.cwp[2][n2];
                     }
                     n1 = n2;
                     n2 = (n2 + 1) & 3;
                 }
                 self.mv[c][to] = bak.0;
+                self.mv2[c][to] = bak.2;
                 if c == 8 {
                     self.ref_pair[to] = bak.1;
+                    self.cwp[2][to] = bak_cwp;
                 }
             }
             return;

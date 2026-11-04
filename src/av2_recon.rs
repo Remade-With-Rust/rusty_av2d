@@ -5193,8 +5193,9 @@ pub fn decode_leaf(
                 let opfl = (info.inter_mode >= 24) as usize;
                 Some((2usize << refine, 4usize >> opfl, false, col_end, row_end))
             } else { None };
-            // Inter-intra chroma blend: single-ref non-TIP only (mirrors the luma gate).
-            let cii = if info.ref1 < 0 && !info.is_tip && info.bawp == 0 { info.ii_mode } else { -1 };
+            // Inter-intra chroma blend: single-ref non-TIP only (mirrors the luma gate), and never
+            // on sub-8x8 shared chroma, which is per-sub-block MC alone (dav2d recon_tmpl.c:3724).
+            let cii = if info.ref1 < 0 && !info.is_tip && info.bawp == 0 && cbs == bs as i32 { info.ii_mode } else { -1 };
             recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, warp_pred, info.filter, cbs != bs as i32, chroma_coefs.as_ref(), bawp_alpha, comp_arg, tip_arg, cii, info.ii_wedge);
             // Sub-PU deblock CHROMA layer — AFTER the chroma recon (recon_inter_chroma's
             // mark_db_chroma writes the chroma edge grids; the caps must land on top of them).
