@@ -379,6 +379,65 @@ pub fn deblock_plane(
     }
 }
 
+/// Parameters of [`deblock_tip_plane`].
+pub struct TipDeblock {
+    /// Spacing of the filtered boundaries in this plane, in pixels.
+    pub unit_w: usize,
+    pub unit_h: usize,
+    pub chroma: bool,
+    /// Height of a 64-luma-px row in this plane.
+    pub sb64_h: usize,
+    /// Tile boundaries in this plane's pixels.
+    pub tile_cols: Vec<usize>,
+    pub tile_rows: Vec<usize>,
+    /// seq `disable_loopfilters_across_tiles`.
+    pub skip_tile_edges: bool,
+    pub q_thr: i32,
+    pub side_thr: i32,
+    pub bdmax: i32,
+}
+
+/// AVM `loop_filter_tip_plane`: a TIP-as-output frame has no block grid, so every unit boundary
+/// is filtered with the frame's one threshold pair: all vertical edges, then all horizontal.
+pub fn deblock_tip_plane(buf: &mut [i32], w: usize, h: usize, stride: usize, p: &TipDeblock) {
+    // AVM filt_choice_highbd.
+    if p.q_thr == 0 || p.side_thr == 0 {
+        return;
+    }
+    // AVM set_tip_filter_length, as (max_width_neg, max_width_pos). A chroma edge whose negative
+    // side is restricted (64px row or tile column boundary) reaches 2 pixels back.
+    let widths = |blk: usize, restricted: bool| -> (i32, i32) {
+        let pos = match (blk, p.chroma) {
+            (0..=4, _) => 1,
+            (8, _) => 3,
+            (_, false) => 6,
+            (_, true) => 4,
+        };
+        let neg = if p.chroma && blk > 4 && restricted { 2 } else { pos };
+        (neg, pos)
+    };
+    let s = stride as isize;
+    for y in (0..h).step_by(4) {
+        for x in (p.unit_w..w).step_by(p.unit_w) {
+            let tile_edge = p.tile_cols.contains(&x);
+            if tile_edge && p.skip_tile_edges {
+                continue;
+            }
+            let (neg, pos) = widths(p.unit_w, tile_edge);
+            deblock(buf, y * stride + x, p.q_thr, p.side_thr, s, 1, pos, neg, false, false, p.bdmax);
+        }
+    }
+    for x in (0..w).step_by(4) {
+        for y in (p.unit_h..h).step_by(p.unit_h) {
+            if p.skip_tile_edges && p.tile_rows.contains(&y) {
+                continue;
+            }
+            let (neg, pos) = widths(p.unit_h, y & (p.sb64_h - 1) == 0);
+            deblock(buf, y * stride + x, p.q_thr, p.side_thr, 1, s, pos, neg, false, false, p.bdmax);
+        }
+    }
+}
+
 /// Luma / chroma boundary-strength → max filter width tables (dav2d `max_width_y/uv`).
 pub const MAX_WIDTH_Y_TBL: [i32; 4] = MAX_WIDTH_Y;
 pub const MAX_WIDTH_UV_TBL: [i32; 3] = MAX_WIDTH_UV;
@@ -401,6 +460,71 @@ mod tests {
             }
         }
         v
+    }
+
+    fn tip_params(unit: usize, chroma: bool) -> TipDeblock {
+        TipDeblock {
+            unit_w: unit,
+            unit_h: unit,
+            chroma,
+            sb64_h: 32,
+            tile_cols: Vec::new(),
+            tile_rows: Vec::new(),
+            skip_tile_edges: false,
+            q_thr: 40,
+            side_thr: 50,
+            bdmax: 255,
+        }
+    }
+
+    /// Flat 8x8 blocks with a step between them: `value(x, y)` per pixel.
+    fn tip_plane(w: usize, h: usize, value: impl Fn(usize, usize) -> i32) -> Vec<i32> {
+        (0..w * h).map(|i| value(i % w, i / w)).collect()
+    }
+
+    #[test]
+    fn tip_filter_touches_only_unit_boundaries() {
+        // Step at x=16 only. Luma unit 16 reaches 6 pixels either side of it.
+        let (w, h) = (32, 16);
+        let mut v = tip_plane(w, h, |x, _| if x < 16 { 100 } else { 150 });
+        deblock_tip_plane(&mut v, w, h, w, &tip_params(16, false));
+        for y in 0..h {
+            assert_eq!(v[y * w + 15], 123, "row {y}");
+            assert_eq!(v[y * w + 16], 127, "row {y}");
+            assert_eq!(v[y * w + 9], 100, "row {y}");
+            assert_eq!(v[y * w + 22], 150, "row {y}");
+        }
+        // A step off the unit grid is a real image edge, not a boundary to filter.
+        let mut v = tip_plane(w, h, |x, _| if x < 12 { 100 } else { 150 });
+        let orig = v.clone();
+        deblock_tip_plane(&mut v, w, h, w, &tip_params(16, false));
+        assert_eq!(v, orig);
+    }
+
+    #[test]
+    fn tip_chroma_restricts_the_row_above_a_64px_boundary() {
+        // Chroma unit 8, 64-luma-px rows are 32 chroma rows high: y=32 reaches 2 rows back at most.
+        let (w, h) = (8, 48);
+        let mut v = tip_plane(w, h, |_, y| if y < 32 { 100 } else { 150 });
+        deblock_tip_plane(&mut v, w, h, w, &tip_params(8, true));
+        assert_eq!(v[29 * w], 100);
+        assert_ne!(v[31 * w], 100);
+        // y=16 is an ordinary boundary: 3 rows back are in reach.
+        let mut v = tip_plane(w, h, |_, y| if y < 16 { 100 } else { 150 });
+        deblock_tip_plane(&mut v, w, h, w, &tip_params(8, true));
+        assert_ne!(v[13 * w], 100);
+    }
+
+    #[test]
+    fn tip_filter_honours_disabled_tile_edges() {
+        let (w, h) = (32, 16);
+        let plane = tip_plane(w, h, |x, _| if x < 16 { 100 } else { 150 });
+        let mut p = tip_params(16, false);
+        p.tile_cols = vec![16];
+        p.skip_tile_edges = true;
+        let mut v = plane.clone();
+        deblock_tip_plane(&mut v, w, h, w, &p);
+        assert_eq!(v, plane);
     }
 
     #[test]

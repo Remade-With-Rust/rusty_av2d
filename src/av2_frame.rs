@@ -1614,6 +1614,52 @@ fn crop_plane(src: &[i32], stride: usize, w: usize, h: usize) -> Vec<i32> {
     out
 }
 
+/// AVM `init_tip_lf_parameter` + `loop_filter_tip_frame`: deblock a TIP-as-output frame in place.
+pub fn deblock_tip_frame() {
+    use crate::av2_deblock::{deblock_quant_thr, deblock_side_thr, deblock_tip_plane, TipDeblock};
+    let cfg = crate::av2_recon::HDR_TOOL_CFG.with(|c| c.get());
+    // AVM get_unit_bsize_for_tip_frame: 16x16 unless optical flow refines this frame's TIP blocks.
+    let opfl = crate::av2_recon::SEQ_TIP.with(|c| c.get()).4 && cfg.tip_subpel_filter == 2;
+    let unit = if opfl { 8 } else { 16 };
+    let yac = F2_YAC.with(|c| c.get()) as i32;
+    let [_, _, _, uac, vac] = F2_QDELTAS.with(|c| c.get());
+    let ti = crate::av2_recon::TILE_INFO.with(|c| c.get());
+    let skip_tile_edges = crate::av2_recon::SEQ_NO_LF_ACROSS_TILES.with(|c| c.get());
+    let (ssh, ssv) = crate::av2_recon::ss_g();
+    FRAME.with(|fr| {
+        let mut f = fr.borrow_mut();
+        let bdmax = f.bitdepth_max;
+        let hbd = ((bdmax + 1).trailing_zeros() as i32 - 8) / 2;
+        for (pl, delta) in [0, uac, vac].into_iter().enumerate() {
+            let (sx, sy) = if pl == 0 { (0, 0) } else { (ssh, ssv) };
+            let p = &mut f.pl[pl];
+            if p.w == 0 {
+                continue;
+            }
+            let tile_edges = |n: u8, start4: &[u16], ss: usize| -> Vec<usize> {
+                (1..n as usize).map(|i| (start4[i] as usize * 4) >> ss).collect()
+            };
+            let params = TipDeblock {
+                unit_w: unit >> sx,
+                unit_h: unit >> sy,
+                chroma: pl != 0,
+                sb64_h: 64 >> sy,
+                tile_cols: tile_edges(ti.cols, &ti.col_start4, sx),
+                tile_rows: tile_edges(ti.rows, &ti.row_start4, sy),
+                skip_tile_edges,
+                q_thr: deblock_quant_thr(yac + delta, hbd),
+                side_thr: deblock_side_thr(yac + delta, hbd),
+                bdmax,
+            };
+            let mut buf: Vec<i32> = p.px.iter().map(|&v| v as i32).collect();
+            deblock_tip_plane(&mut buf, p.w, p.h, p.stride, &params);
+            for (d, &v) in p.px.iter_mut().zip(&buf) {
+                *d = v as u16;
+            }
+        }
+    });
+}
+
 pub fn filter_frame_chain(gdf_ref_dst: usize) {
     use crate::av2_deblock::{deblock_plane, deblock_quant_thr, deblock_side_thr, MAX_WIDTH_UV_TBL, MAX_WIDTH_Y_TBL};
     use crate::av2_filter::{adjust_strength, cdef_block, cdef_find_dir, ccso_score, CCSO_POS};

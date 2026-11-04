@@ -620,6 +620,8 @@ thread_local! {
     pub static SEQ_TIP: std::cell::Cell<(u8, bool, u8, bool, bool)> = const { std::cell::Cell::new((0, false, 0, false, false)) };
     /// seq `tip_explicit_qp` (dav2d obu.c:490).
     pub static SEQ_TIP_QP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// seq `disable_loopfilters_across_tiles`.
+    pub static SEQ_NO_LF_ACROSS_TILES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Number of frames DECODED so far (incremented after each frame). For a P-chain this equals
     /// the implicit `n_ref_frames` for the next frame (frame 1→1 ref, frame 2→2 refs, …) — a
     /// stand-in for dav2d's implicit ref-buffer scoring (get_ref_frames) which mine defers.
@@ -683,7 +685,7 @@ fn bdmax_g() -> i32 {
 
 /// Process-global chroma subsampling `(ss_hor, ss_ver)` as usize (420=(1,1), 422=(1,0), 444=(0,0)).
 #[inline]
-fn ss_g() -> (usize, usize) {
+pub(crate) fn ss_g() -> (usize, usize) {
     crate::av2_frame::SS.with(|c| {
         let s = c.get();
         (s.0 as usize, s.1 as usize)
@@ -720,6 +722,9 @@ impl TileInfo {
 pub struct RefSlot {
     pub order_hint: u32,
     pub qidx: u16,
+    /// Frame chroma AC q deltas: a TIP-as-output frame averages these from its two refs.
+    pub uac_delta: i32,
+    pub vac_delta: i32,
     pub width: u32,
     pub height: u32,
     /// dav2d `IS_KEY_OR_INTRA(refhdr)` — a key/intra ref is skipped as a primary-ref-cdf source
@@ -1007,7 +1012,8 @@ pub fn update_ref_slots(is_key_or_intra: bool) {
     let (order_hint, refresh, qidx, width, height) = CUR_FRAME_REF.with(|c| c.get());
     let show_implicit = AV2_SHOW.with(|c| c.get()).1;
     let is_sframe = CUR_IS_SFRAME.with(|c| c.get());
-    let slot = RefSlot { order_hint, qidx, width, height, is_key_or_intra, show_implicit, restricted: false, is_sframe };
+    let [_, _, _, uac_delta, vac_delta] = crate::av2_frame::F2_QDELTAS.with(|c| c.get());
+    let slot = RefSlot { order_hint, qidx, uac_delta, vac_delta, width, height, is_key_or_intra, show_implicit, restricted: false, is_sframe };
     REF_SLOTS.with(|s| {
         let mut slots = s.borrow_mut();
         for i in 0..8 {

@@ -247,6 +247,121 @@ const CCSO_QUANT_SZ: [[u16; 4]; 4] = [
     [80, 112, 160, 256],
 ];
 
+/// Read the frame's film grain selection into [`crate::av2_grain::CUR_GRAIN`].
+fn parse_frame_grain(gb: &mut GetBits, seq_hdr: &Rav1dSequenceHeader) {
+    // film grain (dav obu.c:2073): seq-gated + only for SHOWN frames (immediate or
+    // implicit); present bit → FGM table id (3b) + per-frame seed (16b). The tables
+    // themselves arrive in the FGM OBU (type 23).
+    crate::av2_grain::CUR_GRAIN.with(|c| c.set(None));
+    {
+        let (show_imm, show_impl) = crate::av2_recon::AV2_SHOW.with(|c| c.get());
+        if seq_hdr.film_grain_present != 0 && (show_imm || show_impl) {
+            let present = seq_hdr.reduced_still_picture_header != 0 || gb.get_bit();
+            if present {
+                let id = gb.get_bits(3) as u8;
+                let seed = gb.get_bits(16) as u16;
+                crate::av2_grain::CUR_GRAIN.with(|c| c.set(Some((id, seed))));
+            }
+        }
+    }
+}
+
+/// dav2d `parse_tile_info_frmhdr` (obu.c:964), AVM `read_tile_info`: read the frame's tile
+/// layout into [`crate::av2_recon::TILE_INFO`].
+fn parse_frame_tile_info(gb: &mut GetBits, seq_hdr: &Rav1dSequenceHeader, width: u32, height: u32) {
+    // --- parse_tile_info_frmhdr (obu.c:964): keyframe at full res => reuse_allowed,
+    // so frame tiling == seq tiling. Size-mismatch fresh-parse handled too. ---
+    let (t_log2_cols, t_log2_rows);
+    if seq_hdr.av2.tiling_present != 0
+        && (seq_hdr.av2.tiling_present == 1 || gb.get_bit())
+    {
+        t_log2_cols = seq_hdr.av2.tiling_log2_cols;
+        t_log2_rows = seq_hdr.av2.tiling_log2_rows;
+    } else {
+        let frame_sb128 = (seq_hdr.sb128 != 0) as u32;
+        (t_log2_cols, t_log2_rows) = parse_seq_tile_info(
+            gb,
+            frame_sb128,
+            seq_hdr.sb128 as u32,
+            width,
+            height,
+            seq_hdr.av2.level as c_uint,
+            seq_hdr.av2.tier != 0,
+        );
+    }
+    let mut tiling_n_bytes = 1u8;
+    if t_log2_cols != 0 || t_log2_rows != 0 {
+        if seq_hdr.av2.avg_cdf_type == 0 {
+            gb.get_bits((t_log2_cols + t_log2_rows) as c_int); // tiling.update
+        }
+        tiling_n_bytes = gb.get_bits(2) as u8 + 1;
+    }
+    // Tile grid geometry (dav2d parse_tile_info UNIFORM branch, obu.c:127-160): the tile
+    // distribution runs over FULL SBs only (`fsbw = max(1,(w+7)>>seq_sbsz_log2)`), tile_w =
+    // max(1, fsbw>>log2), remainder spread +1 over the FIRST tiles; the terminator entry is
+    // the rounded-UP extent. Non-uniform seq tiling isn't minted in the corpus yet — this
+    // recompute assumes uniform (the seq bit consumption was already handled at parse time).
+    {
+        let sbl2 = 6 + seq_hdr.sb128 as usize;
+        let sbw = ((width as usize) + (1 << sbl2) - 1) >> sbl2;
+        let sbh = ((height as usize) + (1 << sbl2) - 1) >> sbl2;
+        let fsbw = (((width as usize) + 7) >> sbl2).max(1);
+        let fsbh = (((height as usize) + 7) >> sbl2).max(1);
+        let sb4 = 1usize << (sbl2 - 2); // SB size in 4px units
+        let mut ti = crate::av2_recon::TileInfo::single();
+        ti.log2_cols = t_log2_cols;
+        ti.log2_rows = t_log2_rows;
+        ti.n_bytes = tiling_n_bytes;
+        let tile_w = (fsbw >> t_log2_cols).max(1);
+        let mut extra = fsbw.saturating_sub(tile_w << t_log2_cols) as i32;
+        let (mut cols, mut sbx) = (0usize, 0usize);
+        while sbx < fsbw {
+            ti.col_start4[cols] = (sbx * sb4) as u16;
+            sbx += tile_w + (extra > 0) as usize;
+            extra -= 1;
+            cols += 1;
+        }
+        ti.cols = cols as u8;
+        ti.col_start4[cols] = (sbw * sb4) as u16;
+        let tile_h = (fsbh >> t_log2_rows).max(1);
+        let mut extra = fsbh.saturating_sub(tile_h << t_log2_rows) as i32;
+        let (mut rows, mut sby) = (0usize, 0usize);
+        while sby < fsbh {
+            ti.row_start4[rows] = (sby * sb4) as u16;
+            sby += tile_h + (extra > 0) as usize;
+            extra -= 1;
+            rows += 1;
+        }
+        ti.rows = rows as u8;
+        ti.row_start4[rows] = (sbh * sb4) as u16;
+        crate::av2_recon::TILE_INFO.with(|c| c.set(ti));
+        // Tile-adaptive filter units (avm get_ccso_unit_size_log2_adaptive_tile +
+        // init_gdf): non-last tile spans not 4/2-SB-divisible shrink the CCSO unit
+        // (256px → SB..128px); any odd-SB span with 64px SBs shrinks GDF (128→64px).
+        let (mut e2, mut e4) = (0usize, 0usize);
+        for i in 0..cols - 1 {
+            let s = ((ti.col_start4[i + 1] - ti.col_start4[i]) as usize) / sb4;
+            e2 += s & 1;
+            e4 += s & 3;
+        }
+        for i in 0..rows - 1 {
+            let s = ((ti.row_start4[i + 1] - ti.row_start4[i]) as usize) / sb4;
+            e2 += s & 1;
+            e4 += s & 3;
+        }
+        let multi = cols > 1 || rows > 1;
+        let ccso_log2 = if !multi {
+            8
+        } else if sbl2 < 8 {
+            if e4 == 0 { (sbl2 + 2).min(8) } else if e2 == 0 { (sbl2 + 1).min(8) } else { sbl2 }
+        } else {
+            sbl2
+        };
+        let gdf_bs4 = if multi && seq_hdr.sb128 == 0 && e2 > 0 { 16 } else { 32 };
+        crate::av2_recon::FILTER_UNITS.with(|c| c.set((1usize << (ccso_log2 - 2), gdf_bs4)));
+    }
+}
+
 /// AV2 frame header — FRONT (dav2d obu.c:1052..1130): ids, frame type from the OBU
 /// type, long-term-ref id, and show flags. The rest (obu.c:1130..2045) is the next
 /// pass; for now this parses the front, reports, and returns Err.
@@ -587,6 +702,7 @@ fn parse_av2_frame_hdr_front(
                         apply_filter = gb.get_bit();
                     }
                 }
+                let mut uv_ac_delta = (0i32, 0i32);
                 let yac2: u16 = if crate::av2_recon::SEQ_TIP_QP.with(|c| c.get()) {
                     crate::dlog!("[rav2d AV2 framehdr] fm2 tip_explicit_qp — unimplemented");
                     return Err(Rav1dError::InvalidArgument);
@@ -594,15 +710,17 @@ fn parse_av2_frame_hdr_front(
                     let tr = crate::av2_refmvs::TMVS.with(|c| c.borrow().tip_ref);
                     crate::av2_recon::REF_SLOTS.with(|sl| {
                         let sl = sl.borrow();
-                        let q0 = sl[refidx[tr.0 as usize] as usize].as_ref().map_or(0, |r| r.qidx);
-                        let q1 = sl[refidx[tr.1 as usize] as usize].as_ref().map_or(0, |r| r.qidx);
-                        (q0 + q1 + 1) >> 1
+                        let r0 = sl[refidx[tr.0 as usize] as usize].as_ref();
+                        let r1 = sl[refidx[tr.1 as usize] as usize].as_ref();
+                        let avg = |f: fn(&crate::av2_recon::RefSlot) -> i32| {
+                            (r0.map_or(0, f) + r1.map_or(0, f) + 1) >> 1
+                        };
+                        uv_ac_delta = (avg(|r| r.uac_delta), avg(|r| r.vac_delta));
+                        avg(|r| r.qidx as i32) as u16
                     })
                 };
-                if apply_filter {
-                    crate::dlog!("[rav2d AV2 framehdr] fm2 tip.apply_filter — sub-PU deblock port pending");
-                    return Err(Rav1dError::InvalidArgument);
-                }
+                // AVM av2_dec_setup_tip_frame: the frame takes the averaged q of its two refs.
+                crate::av2_frame::F2_QDELTAS.with(|c| c.set([0, 0, 0, uv_ac_delta.0, uv_ac_delta.1]));
                 crate::av2_recon::HDR_TOOL_CFG.with(|c| {
                     let mut cfg = c.get();
                     cfg.tip_apply_filter = apply_filter;
@@ -615,14 +733,20 @@ fn parse_av2_frame_hdr_front(
                     crate::av2_recon::CUR_PRIMARY_REF.with(|c| c.set(r0 as u8));
                     crate::av2_recon::CUR_SECONDARY_REF.with(|c| c.set(if r1 != r0 { r1 as u8 } else { r0 as u8 }));
                 }
-                crate::av2_recon::TILE_INFO.with(|c| {
-                    let mut t = c.get();
-                    t.cols = 1;
-                    t.rows = 1;
-                    t.log2_cols = 0;
-                    t.log2_rows = 0;
-                    c.set(t);
-                });
+                // AVM read_uncompressed_header: tile info is only coded when the filter runs.
+                if apply_filter {
+                    parse_frame_tile_info(gb, seq_hdr, width, height);
+                } else {
+                    crate::av2_recon::TILE_INFO.with(|c| {
+                        let mut t = c.get();
+                        t.cols = 1;
+                        t.rows = 1;
+                        t.log2_cols = 0;
+                        t.log2_rows = 0;
+                        c.set(t);
+                    });
+                }
+                parse_frame_grain(gb, seq_hdr);
                 crate::av2_frame::DEBLOCK_CFG.with(|c| c.set(Default::default()));
                 crate::av2_frame::CDEF_CFG.with(|c| { let mut f = c.get(); f.enabled = false; c.set(f); });
                 crate::av2_frame::CCSO_CFG.with(|c| { let mut f = c.borrow().clone(); f.enabled = false; *c.borrow_mut() = f; });
@@ -714,99 +838,7 @@ fn parse_av2_frame_hdr_front(
         crate::dlog!("F2HDR cdfupd off={}", gb.pos() - off_base);
         let _ = (allow_scc, allow_intrabc, disable_cdf_update);
 
-        // --- parse_tile_info_frmhdr (obu.c:964): keyframe at full res => reuse_allowed,
-        // so frame tiling == seq tiling. Size-mismatch fresh-parse handled too. ---
-        let (t_log2_cols, t_log2_rows);
-        if seq_hdr.av2.tiling_present != 0
-            && (seq_hdr.av2.tiling_present == 1 || gb.get_bit())
-        {
-            t_log2_cols = seq_hdr.av2.tiling_log2_cols;
-            t_log2_rows = seq_hdr.av2.tiling_log2_rows;
-        } else {
-            let frame_sb128 = (seq_hdr.sb128 != 0) as u32;
-            (t_log2_cols, t_log2_rows) = parse_seq_tile_info(
-                gb,
-                frame_sb128,
-                seq_hdr.sb128 as u32,
-                width,
-                height,
-                seq_hdr.av2.level as c_uint,
-                seq_hdr.av2.tier != 0,
-            );
-        }
-        crate::dlog!("F2HDR tiling0 off={} TILEGEO log2c={} log2r={} w={} h={}", gb.pos() - off_base, t_log2_cols, t_log2_rows, width, height);
-        let mut tiling_n_bytes = 1u8;
-        if t_log2_cols != 0 || t_log2_rows != 0 {
-            if seq_hdr.av2.avg_cdf_type == 0 {
-                gb.get_bits((t_log2_cols + t_log2_rows) as c_int); // tiling.update
-            }
-            tiling_n_bytes = gb.get_bits(2) as u8 + 1;
-        }
-        // Tile grid geometry (dav2d parse_tile_info UNIFORM branch, obu.c:127-160): the tile
-        // distribution runs over FULL SBs only (`fsbw = max(1,(w+7)>>seq_sbsz_log2)`), tile_w =
-        // max(1, fsbw>>log2), remainder spread +1 over the FIRST tiles; the terminator entry is
-        // the rounded-UP extent. Non-uniform seq tiling isn't minted in the corpus yet — this
-        // recompute assumes uniform (the seq bit consumption was already handled at parse time).
-        {
-            let sbl2 = 6 + seq_hdr.sb128 as usize;
-            let sbw = ((width as usize) + (1 << sbl2) - 1) >> sbl2;
-            let sbh = ((height as usize) + (1 << sbl2) - 1) >> sbl2;
-            let fsbw = (((width as usize) + 7) >> sbl2).max(1);
-            let fsbh = (((height as usize) + 7) >> sbl2).max(1);
-            let sb4 = 1usize << (sbl2 - 2); // SB size in 4px units
-            let mut ti = crate::av2_recon::TileInfo::single();
-            ti.log2_cols = t_log2_cols;
-            ti.log2_rows = t_log2_rows;
-            ti.n_bytes = tiling_n_bytes;
-            let tile_w = (fsbw >> t_log2_cols).max(1);
-            let mut extra = fsbw.saturating_sub(tile_w << t_log2_cols) as i32;
-            let (mut cols, mut sbx) = (0usize, 0usize);
-            while sbx < fsbw {
-                ti.col_start4[cols] = (sbx * sb4) as u16;
-                sbx += tile_w + (extra > 0) as usize;
-                extra -= 1;
-                cols += 1;
-            }
-            ti.cols = cols as u8;
-            ti.col_start4[cols] = (sbw * sb4) as u16;
-            let tile_h = (fsbh >> t_log2_rows).max(1);
-            let mut extra = fsbh.saturating_sub(tile_h << t_log2_rows) as i32;
-            let (mut rows, mut sby) = (0usize, 0usize);
-            while sby < fsbh {
-                ti.row_start4[rows] = (sby * sb4) as u16;
-                sby += tile_h + (extra > 0) as usize;
-                extra -= 1;
-                rows += 1;
-            }
-            ti.rows = rows as u8;
-            ti.row_start4[rows] = (sbh * sb4) as u16;
-            crate::av2_recon::TILE_INFO.with(|c| c.set(ti));
-            // Tile-adaptive filter units (avm get_ccso_unit_size_log2_adaptive_tile +
-            // init_gdf): non-last tile spans not 4/2-SB-divisible shrink the CCSO unit
-            // (256px → SB..128px); any odd-SB span with 64px SBs shrinks GDF (128→64px).
-            let (mut e2, mut e4) = (0usize, 0usize);
-            for i in 0..cols - 1 {
-                let s = ((ti.col_start4[i + 1] - ti.col_start4[i]) as usize) / sb4;
-                e2 += s & 1;
-                e4 += s & 3;
-            }
-            for i in 0..rows - 1 {
-                let s = ((ti.row_start4[i + 1] - ti.row_start4[i]) as usize) / sb4;
-                e2 += s & 1;
-                e4 += s & 3;
-            }
-            let multi = cols > 1 || rows > 1;
-            let ccso_log2 = if !multi {
-                8
-            } else if sbl2 < 8 {
-                if e4 == 0 { (sbl2 + 2).min(8) } else if e2 == 0 { (sbl2 + 1).min(8) } else { sbl2 }
-            } else {
-                sbl2
-            };
-            let gdf_bs4 = if multi && seq_hdr.sb128 == 0 && e2 > 0 { 16 } else { 32 };
-            crate::av2_recon::FILTER_UNITS.with(|c| c.set((1usize << (ccso_log2 - 2), gdf_bs4)));
-        }
-
+        parse_frame_tile_info(gb, seq_hdr, width, height);
         crate::dlog!("F2HDR tiling off={}", gb.pos() - off_base);
         // --- quant: yac (obu.c:1434) ---
         let yac = gb.get_bits(8 + (seq_hdr.hbd != 0) as c_int);
@@ -836,7 +868,6 @@ fn parse_av2_frame_hdr_front(
         // Publish primary+secondary so the SB-loop can inherit/average the CDF (dav2d 5394-5413).
         crate::av2_recon::CUR_PRIMARY_REF.with(|c| c.set(primary_ref_frame as u8));
         crate::av2_recon::CUR_SECONDARY_REF.with(|c| c.set(secondary_ref_frame as u8));
-        let _ = (t_log2_cols, t_log2_rows);
         let is_i400 = seq_hdr.layout == Rav1dPixelLayout::I400;
         // quant DC/AC deltas (obu.c:1435). uac/vac feed the chroma deblock thresholds.
         // The DC deltas (ydc/udc/vdc) select a SEPARATE DC quantizer per plane (dav2d decode.c:128
@@ -1499,21 +1530,7 @@ fn parse_av2_frame_hdr_front(
         // global motion (obu.c:1960): `seqhdr.global_motion && get_bit` → gmv params. seq
         // global_motion=0 for this clip → 0 bits (short-circuit). Plumb the seq flag + the
         // per-ref warp params (needs n_ref_frames) when a stream enables global motion.
-        // film grain (dav obu.c:2073): seq-gated + only for SHOWN frames (immediate or
-        // implicit); present bit → FGM table id (3b) + per-frame seed (16b). The tables
-        // themselves arrive in the FGM OBU (type 23).
-        crate::av2_grain::CUR_GRAIN.with(|c| c.set(None));
-        {
-            let (show_imm, show_impl) = crate::av2_recon::AV2_SHOW.with(|c| c.get());
-            if seq_hdr.film_grain_present != 0 && (show_imm || show_impl) {
-                let present = seq_hdr.reduced_still_picture_header != 0 || gb.get_bit();
-                if present {
-                    let id = gb.get_bits(3) as u8;
-                    let seed = gb.get_bits(16) as u16;
-                    crate::av2_grain::CUR_GRAIN.with(|c| c.set(Some((id, seed))));
-                }
-            }
-        }
+        parse_frame_grain(gb, seq_hdr);
         crate::dlog!(
             "[rav2d AV2 framehdr] *** FRAME HEADER COMPLETE *** bit_error={} hdr_bits={}",
             gb.has_error() != 0,
@@ -1862,7 +1879,8 @@ fn parse_seq_hdr(
             uvac_dq_enabled = gb.get_bit();
         }
         // in-loop filters (628)
-        gb.get_bit(); // disable_loopfilters_across_tiles
+        // disable_loopfilters_across_tiles
+        crate::av2_recon::SEQ_NO_LF_ACROSS_TILES.with(|c| c.set(gb.get_bit()));
         let cdef = gb.get_bit();
         let gdf = gb.get_bit();
         if gdf && sb128 == 0 {
@@ -2984,6 +3002,9 @@ fn parse_obus(
                     crate::cdf_av2::stash_cdf(&cdf_fm2, refresh, false);
                 } else {
                     crate::cdf_av2::stash_cdf_verbatim(&cdf_fm2, refresh);
+                }
+                if crate::av2_recon::HDR_TOOL_CFG.with(|cc| cc.get().tip_apply_filter) {
+                    crate::av2_frame::deblock_tip_frame();
                 }
                 crate::av2_frame::filter_frame_chain(0); // all filter cfgs off → identity
                 crate::av2_frame::stash_decoded_frame1();
