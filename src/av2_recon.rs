@@ -1102,7 +1102,7 @@ pub fn tip_recon_sb(bx4: usize, by4: usize, iw4: usize, ih4: usize) {
     let opfl = seq_tip_refine && (cfg.tip_frame_mode == 1 || cfg.tip_subpel_filter == 2);
     let step = 2usize << (!opfl as usize);
     let tip_arg = Some((step, step, true, iw4, ih4));
-    recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, None, filter, false, None, None, None, tip_arg, -1, -1, [None; 2]);
+    recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, None, filter, false, None, None, None, tip_arg, -1, -1, [None; 2], false);
 }
 
 /// dav2d `derive_pri_sec_ref` (obu.c:929): when primary_ref_frame is NOT signaled, it is derived
@@ -3220,6 +3220,8 @@ fn recon_inter_chroma(
     ii_wedge: i32,
     // Compound warp-causal models, per arm (None = translational MC for that arm).
     comp_warp: [Option<[i32; 6]>; 2],
+    // The off-frame compound mask is off for warp-causal and GLOBALMV_GLOBALMV (dav2d recon_tmpl.c:3800).
+    comp_no_bacp: bool,
 ) {
     // `bx4`/`by4` = LUMA block pos (for the warp matrix eval); `cpx`/`cpy`/`cw`/`ch` = the chroma
     // block's pixel origin + dims (for a sub-8×8 shared chroma these come from the 8×8 carrier).
@@ -3443,7 +3445,7 @@ fn recon_inter_chroma(
                             let oof = x0 < 0 || x1 < 0 || y0 < 0 || y1 < 0
                                 || x0 + cw as i32 >= fw_px || x1 + cw as i32 >= fw_px
                                 || y0 + ch as i32 >= fh_px || y1 + ch as i32 >= fh_px;
-                            if oof {
+                            if oof && !comp_no_bacp {
                                 SEG_SCRATCH.with(|sc| {
                                     let mut scr = sc.borrow_mut();
                                     if pl == 0 {
@@ -5254,7 +5256,7 @@ pub fn decode_leaf(
             // Inter-intra chroma blend: single-ref non-TIP only (mirrors the luma gate), and never
             // on sub-8x8 shared chroma, which is per-sub-block MC alone (dav2d recon_tmpl.c:3724).
             let cii = if info.ref1 < 0 && !info.is_tip && info.bawp == 0 && cbs == bs as i32 { info.ii_mode } else { -1 };
-            recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, warp_pred, info.filter, cbs != bs as i32, chroma_coefs.as_ref(), bawp_alpha, comp_arg, tip_arg, cii, info.ii_wedge, comp_warp);
+            recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, warp_pred, info.filter, cbs != bs as i32, chroma_coefs.as_ref(), bawp_alpha, comp_arg, tip_arg, cii, info.ii_wedge, comp_warp, info.motion_mode == 2 || info.inter_mode == 21);
             // Sub-PU deblock CHROMA layer — AFTER the chroma recon (recon_inter_chroma's
             // mark_db_chroma writes the chroma edge grids; the caps must land on top of them).
             let dcfg2 = crate::av2_frame::DEBLOCK_CFG.with(|c| c.get());
