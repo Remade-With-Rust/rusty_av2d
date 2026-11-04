@@ -1230,9 +1230,22 @@ pub struct BlockNbCtx {
     /// compound type per col/row (dav2d `comp_type`: 0=NONE, 1=AVG, 2=WEDGE, 3=SEG), base 0.
     /// Feeds the comp_type_masked context (neighbour comp_type > AVG when compound).
     pub comp_type: Vec<u8>,
+    /// `ref0`, `ref1` and `motion_mode` as they stood when the superblock row began (dav2d
+    /// `a_sb_cache`, AVM #1091). A block on a superblock's top row reads the row above at 8px
+    /// granularity, which can round left onto a column this row has already overwritten.
+    pub sb_row_ref0: Vec<u8>,
+    pub sb_row_ref1: Vec<i8>,
+    pub sb_row_motion_mode: Vec<u8>,
 }
 
 impl BlockNbCtx {
+    /// Save the context a superblock's top row reads. Call before decoding each superblock row.
+    pub fn snapshot_sb_row(&mut self) {
+        self.sb_row_ref0.clone_from(&self.ref0);
+        self.sb_row_ref1.clone_from(&self.ref1);
+        self.sb_row_motion_mode.clone_from(&self.motion_mode);
+    }
+
     pub fn new(n: usize) -> Self {
         Self {
             partition: vec![0; n],
@@ -1255,6 +1268,9 @@ impl BlockNbCtx {
             amvd: vec![0; n],
             skip_mode: vec![0; n],
             comp_type: vec![0; n],
+            sb_row_ref0: vec![0; n],
+            sb_row_ref1: vec![-1; n],
+            sb_row_motion_mode: vec![0; n],
         }
     }
 }
@@ -1479,12 +1495,16 @@ pub fn get_warp_ctx(
         (((dir.ref0[idx] != 0 && dir.ref0[idx] - 1 == ref_) || dir.ref1[idx] == ref_ as i8)
             && dir.motion_mode[idx] >= 2) as usize
     };
+    let sb_row = |idx: usize| -> usize {
+        (((a.sb_row_ref0[idx] != 0 && a.sb_row_ref0[idx] - 1 == ref_) || a.sb_row_ref1[idx] == ref_ as i8)
+            && a.sb_row_motion_mode[idx] >= 2) as usize
+    };
     let mut ctx = 0;
     if have_top {
         if is_sb_boundary {
-            ctx += m(a, xb4 & !1);
+            ctx += sb_row(xb4 & !1);
             if bw4 >= 4 && ((xb4 + bw4 - 2) & !1) < col_end {
-                ctx += m(a, (xb4 + bw4 - 2) & !1);
+                ctx += sb_row((xb4 + bw4 - 2) & !1);
             }
         } else {
             ctx += m(a, xb4);
@@ -1537,15 +1557,18 @@ fn match_ref(dir: &BlockNbCtx, idx: usize, ref_: u8) -> bool {
 
 /// dav2d `has_cs_ext` (decode.c:3092): any of {left@by4, left@bottom, above@bx4, above@right}
 /// references the same ref. Cleared neighbours (ref0=0) never match, so tile edges are safe.
-/// Non-SB-boundary case only (the SB-boundary above uses a_sb_cache — add when a block needs it).
 pub fn has_cs_ext(
     a: &BlockNbCtx, l: &BlockNbCtx, bx4: usize, by4: usize, bw4: usize, bh4: usize,
-    row_end: usize, col_end: usize, ref_: u8,
+    row_end: usize, col_end: usize, ref_: u8, is_sb_boundary: bool,
 ) -> bool {
+    let sb_row = |i: usize| (a.sb_row_ref0[i] != 0 && a.sb_row_ref0[i] - 1 == ref_) || a.sb_row_ref1[i] == ref_ as i8;
     match_ref(l, by4, ref_)
         || (by4 + bh4 <= row_end && match_ref(l, by4 + bh4 - 1, ref_))
-        || match_ref(a, bx4, ref_)
-        || (bx4 + bw4 <= col_end && match_ref(a, bx4 + bw4 - 1, ref_))
+        || if is_sb_boundary {
+            sb_row(bx4 & !1) || (((bx4 + bw4 - 2) & !1) < col_end && sb_row((bx4 + bw4 - 2) & !1))
+        } else {
+            match_ref(a, bx4, ref_) || (bx4 + bw4 <= col_end && match_ref(a, bx4 + bw4 - 1, ref_))
+        }
 }
 
 /// dav2d `nx`/`xoff` setup (decode.c:1643-1660) for the is_inter + skip contexts — a DIFFERENT
@@ -8539,11 +8562,14 @@ pub fn decode_b_inter(
                 (d.ref0[i] != 0 && (d.ref0[i] as i32 - 1) == r) || (d.ref1[i] as i32) == r
             }
             let match_refs = |r: i32, a: &BlockNbCtx, l: &BlockNbCtx| -> bool {
+                let m_sb_row = |i: usize| -> bool {
+                    (a.sb_row_ref0[i] != 0 && (a.sb_row_ref0[i] as i32 - 1) == r) || (a.sb_row_ref1[i] as i32) == r
+                };
                 m_ref(l, by4, r)
                     || (by4 + bh4 <= row_end && m_ref(l, by4 + bh4 - 1, r))
                     || (if is_sb_boundary {
-                        m_ref(a, bx4 & !1, r)
-                            || (((bx4 + bw4 - 2) & !1) < col_end && m_ref(a, (bx4 + bw4 - 2) & !1, r))
+                        m_sb_row(bx4 & !1)
+                            || (((bx4 + bw4 - 2) & !1) < col_end && m_sb_row((bx4 + bw4 - 2) & !1))
                     } else {
                         m_ref(a, bx4, r)
                             || (bx4 + bw4 <= col_end && m_ref(a, bx4 + bw4 - 1, r))
@@ -8920,7 +8946,7 @@ pub fn decode_b_inter(
     let mut warp_delta = [0i32; 4];
     if inter_mode == WARPNEWMV || inter_mode == WARPMV {
         motion_mode = MM_WARP_DELTA;
-        if inter_mode == WARPNEWMV && has_cs_ext(a, l, bx4, by4, bw4, bh4, row_end, col_end, ref0) {
+        if inter_mode == WARPNEWMV && has_cs_ext(a, l, bx4, by4, bw4, bh4, row_end, col_end, ref0, is_sb_boundary) {
             let nb = nb_setup(have_left, have_top_in_sb, bx4, by4, bw4c, bh4c, bw4, bh4);
             let x1 = nb_motion_mode(a, l, nb[0]);
             let x2 = nb_motion_mode(a, l, nb[1]);

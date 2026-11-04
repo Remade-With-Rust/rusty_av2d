@@ -752,7 +752,7 @@ fn parse_av2_frame_hdr_front(
                 crate::av2_frame::CCSO_CFG.with(|c| { let mut f = c.borrow().clone(); f.enabled = false; *c.borrow_mut() = f; });
                 crate::av2_frame::GDF_CFG.with(|c| { let mut f = c.get(); f.enabled = false; c.set(f); });
                 crate::av2_lr::LR_CFG.with(|c| *c.borrow_mut() = Default::default());
-                crate::dlog!("[rav2d AV2 framehdr] *** TIP fm2 FRAME HEADER COMPLETE *** yac={yac2}");
+                crate::dlog!("[rav2d AV2 framehdr] *** TIP fm2 FRAME HEADER COMPLETE *** yac={yac2} apply_filter={apply_filter}");
                 return Ok((yac2 as u32, frame_type as u8));
             }
         }
@@ -3224,6 +3224,7 @@ fn parse_obus(
                                     crate::av2_refmvs::reset_sbrow();
                                     let mut left_cdef = -1i8;
                                     let mut left_ccso = [0u8; 3];
+                                    anb_t.snapshot_sb_row();
                                     for bx_sb in (cs4..ce4).step_by(sbst) {
                                         crate::av2_refmvs::reset_sb(bx_sb, by_sb, sbst, f2iw4, by_sb == rs4);
                                         crate::av2_lr::read_lr_units_sb(
@@ -3266,6 +3267,7 @@ fn parse_obus(
                         // neighbour): left_cdef=-1, left_ccso=0. Threaded across the row's SBs.
                         let mut left_cdef = -1i8;
                         let mut left_ccso = [0u8; 3];
+                        anb.snapshot_sb_row();
                         for bx_sb in (0..f2iw4).step_by(sbst) {
                             // dav2d reset_sb: reset bank hits + seed banks from the above-SB-row
                             // (skipped on the first SB row). Must fire before the SB's blocks.
