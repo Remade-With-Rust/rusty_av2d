@@ -4934,7 +4934,9 @@ pub fn decode_leaf(
                 }
             }
         }
-        if std::env::var("MMVP").map_or(false, |v| v.parse::<u32>().ok() == Some(crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
+        if std::env::var("MMVP").map_or(false, |v| v == "all" || v.parse::<u32>().ok() == Some(crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
+            let mv1 = comp_preds.map_or(crate::av2_refmvs::Mv { y: 0, x: 0 }, |c| c.0[1]);
+            crate::dlog!("[MMVPA] f={} mi=({bx4},{by4}) mode={} mv0=({},{}) mv1=({},{}) ref=({},{}) mm={} ii={} wri={} bawp={}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()), info.inter_mode, fmv.y, fmv.x, mv1.y, mv1.x, info.ref0, info.ref1, info.motion_mode, info.ii_mode, info.warp_ref_idx, info.bawp);
             crate::dlog!("[MMVP] mi=({bx4},{by4}) fmv=({},{}) fmv1=({},{}) drl=({},{}) filt={} warp={:?} refinemv={} mode={} comp={} ii={}", fmv.y, fmv.x, info.mv_y1, info.mv_x1, info.drl_idx, info.drl_idx1, info.filter, warp_pred, info.refine_mv as u8, info.inter_mode, comp_preds.is_some() as u8, info.ii_mode);
         }
         let d240 = std::env::var("DBG00").is_ok() && ((bx4 == 96 && by4 == 32) || (bx4 == 0 && by4 == 1) || (bx4 == 2 && by4 == 2) || (bx4 == 96 && by4 == 44));
@@ -8776,6 +8778,7 @@ pub fn decode_b_inter(
         splat_nb(&mut a.mrl, &mut l.mrl, bx4, by4, bw4, bh4, 0);
         splat_nb(&mut a.multi_mrl, &mut l.multi_mrl, bx4, by4, bw4, bh4, 0);
         splat_nb(&mut a.intrabc, &mut l.intrabc, bx4, by4, bw4, bh4, 0);
+        if std::env::var("MPREDRL").is_ok() { crate::dlog!("[MEND] mi=({bx4},{by4}) rng={} skip={} skip_mode={}", msac.rng, skip as u8, skip_mode as u8); }
         return InterInfo {
             skip, inter_mode, motion_mode, mvprec_def,
             mv_y: mvs[0].0, mv_x: mvs[0].1, warp_ref_idx: 0, drl_idx: drl_idx[0],

@@ -711,6 +711,7 @@ fn walk_cdf_fields(cdf: &mut CdfContext, kf_only: bool, f: &mut dyn FnMut(&mut [
     m.amvd_joint.cells(3, f);
     m.amvd_index.cells(7, f);
     m.warpmv_with_mvd.cells(1, f);
+    m.warp_delta_prec.cells(1, f);
     m.warp_delta_param.cells(7, f);
     m.warp_delta_sign.cells(1, f);
     m.warp_interintra.cells(1, f);

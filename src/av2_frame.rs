@@ -1711,7 +1711,9 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     }
     // ---- 1. DEBLOCK (all planes, in place) ----
     // MPRE: per-decode-frame all-plane PRE-filter dump, the pair of avm PREFDUMP=path.
-    if let Ok(path) = std::env::var("MPRE") {
+    // TIP-as-output frames have no filter pass in avm, so its paired dumps skip them too.
+    let tip_output = crate::av2_recon::HDR_TOOL_CFG.with(|c| c.get().tip_frame_mode) == 2;
+    if let (Ok(path), false) = (std::env::var("MPRE"), tip_output) {
         thread_local! { static PRE_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
         let n = PRE_N.with(|c| { let v = c.get(); c.set(v + 1); v });
         let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
@@ -2103,7 +2105,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     }
 
     // MFIN: per-decode-frame FINAL dump (mirrors dav DFINDUMP — covers hidden frames).
-    if std::env::var("MFIN").is_ok() {
+    if std::env::var("MFIN").is_ok() && !tip_output {
         thread_local! { static FIN_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
         let n = FIN_N.with(|c| { let v = c.get(); c.set(v + 1); v });
         let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
