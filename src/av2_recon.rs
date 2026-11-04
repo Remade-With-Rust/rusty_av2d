@@ -8338,6 +8338,7 @@ pub fn decode_b_inter(
         splat_nb(&mut a.mrl, &mut l.mrl, bx4, by4, bw4, bh4, 0);
         splat_nb(&mut a.multi_mrl, &mut l.multi_mrl, bx4, by4, bw4, bh4, 0);
         splat_nb(&mut a.intrabc, &mut l.intrabc, bx4, by4, bw4, bh4, 0);
+        if std::env::var("MPREDRL").is_ok() { crate::dlog!("[MEND] mi=({bx4},{by4}) rng={} skip={} skip_mode={}", msac.rng, skip as u8, skip_mode as u8); }
         return InterInfo {
             skip, inter_mode: NEARMV, motion_mode: MM_TRANSLATION, mvprec_def: 1,
             mv_y: 0, mv_x: 0, warp_ref_idx: 0, drl_idx: drl, mv_prec: frame_mv_precision,

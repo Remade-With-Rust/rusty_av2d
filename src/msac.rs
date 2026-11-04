@@ -212,6 +212,15 @@ pub mod symtrace {
             *out = Some(std::fs::File::create(path).unwrap());
         }
         out.as_mut().unwrap().write_fmt(args).unwrap();
+        // SYMBT=n: print where the n-th CDF symbol (0-based, bypass reads not counted) was read.
+        let line = std::fmt::format(args);
+        if line.starts_with('S') {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if std::env::var("SYMBT").is_ok_and(|v| v.parse() == Ok(n)) {
+                eprintln!("[SYMBT] {n}: {line}{}", std::backtrace::Backtrace::force_capture());
+            }
+        }
     }
 }
 

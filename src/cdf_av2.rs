@@ -589,7 +589,10 @@ fn walk_cdf_fields(cdf: &mut CdfContext, kf_only: bool, f: &mut dyn FnMut(&mut [
     m.intrabc.cells(1, f);
     m.gdf.cells(1, f);
     m.cdef_idx0.cells(1, f);
-    m.cdef_idx.cells(1, f);
+    // Row j codes j+2 symbols: the count slot moves with it (dav2d cdf.c `1 + j`).
+    for (j, row) in m.cdef_idx.iter_mut().enumerate() {
+        row.cells(1 + j, f);
+    }
     m.ccso.cells(1, f);
     m.skip_txfm.cells(1, f);
     m.dpcm.cells(1, f);
@@ -612,7 +615,10 @@ fn walk_cdf_fields(cdf: &mut CdfContext, kf_only: bool, f: &mut dyn FnMut(&mut [
     m.cfl_sign.cells(7, f);
     m.cfl_alpha.cells(7, f);
     m.pal_idx_identity.cells(2, f);
-    m.pal_idx.cells(7, f);
+    // Likewise per outer row k (dav2d cdf.c `k + 1`).
+    for (k, row) in m.pal_idx.iter_mut().enumerate() {
+        row.cells(k + 1, f);
+    }
     m.intrabc_mode.cells(1, f);
     m.intrabc_precision.cells(1, f);
     m.morph_pred.cells(1, f);
