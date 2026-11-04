@@ -344,6 +344,9 @@ pub struct Rav1dState {
     pub(crate) operating_point_idc: c_uint,
     pub(crate) max_spatial_id: u8,
     pub(crate) drain: bool,
+    /// The caller signalled end of stream, so pictures still waiting for a later trigger frame
+    /// are output once the remaining input has been parsed.
+    pub(crate) end_of_stream: bool,
     pub(crate) frame_flags: PictureFlags,
     pub(crate) event_flags: Rav1dEventFlags,
     pub(crate) cached_error_props: Rav1dDataProps,

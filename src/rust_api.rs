@@ -240,6 +240,15 @@ impl Decoder {
         Ok(())
     }
 
+    /// Signal that no more data will follow.
+    ///
+    /// Some pictures are only output when a later frame triggers them. After this call,
+    /// [`Decoder::get_picture`] also returns those, so keep calling it until it returns
+    /// `Err(`[`Rav1dError::TryAgain`]`)`. Sending new data afterwards resumes decoding.
+    pub fn finish(&mut self) -> Result<(), Rav1dError> {
+        rav1d_send_data(&self.ctx, &mut Rav1dData::default())
+    }
+
     /// Get the next decoded frame from the decoder.
     ///
     /// If this returns `Err(`[`Rav1dError::TryAgain`]`)` then further data has to be sent to the decoder

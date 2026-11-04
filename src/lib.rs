@@ -673,7 +673,9 @@ fn gen_picture(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult {
         data: r#in,
         m: props,
     } = mem::take(&mut state.in_0);
-    let Some(mut r#in) = r#in else { return Ok(()) };
+    let Some(mut r#in) = r#in else {
+        return finish_stream(c, state);
+    };
     while !r#in.is_empty() {
         let len = rav1d_parse_obus(c, state, &r#in, &props);
         if let Ok(len) = len {
@@ -694,6 +696,19 @@ fn gen_picture(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult {
         }
         len?;
     }
+    if state.in_0.data.is_none() && !output_picture_ready(c, state, false) {
+        return finish_stream(c, state);
+    }
+    Ok(())
+}
+
+/// On end of stream, queue every picture still waiting for a later trigger frame and emit the
+/// first of them. Later ones go out through [`crate::obu::av2_pop_pending`].
+fn finish_stream(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult {
+    if mem::take(&mut state.end_of_stream) {
+        crate::obu::av2_queue_flush();
+        crate::obu::av2_pop_pending(c, state)?;
+    }
     Ok(())
 }
 
@@ -703,6 +718,11 @@ pub(crate) fn rav1d_send_data(c: &Rav1dContext, in_0: &mut Rav1dData) -> Rav1dRe
         let sz = data.len();
         validate_input!((sz > 0 && sz <= usize::MAX / 2, Rav1dError::InvalidArgument))?;
         state.drain = false;
+        state.end_of_stream = false;
+    } else {
+        // Empty data is the end-of-stream signal (dav2d: `dav2d_send_data(c, NULL)`).
+        state.end_of_stream = true;
+        return Ok(());
     }
     if state.in_0.data.is_some() {
         return Err(Rav1dError::TryAgain);

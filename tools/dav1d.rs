@@ -296,6 +296,9 @@ unsafe fn main_0(argc: c_int, argv: *const *mut c_char) -> c_int {
         },
     };
     let mut n_out: c_uint = 0 as c_int as c_uint;
+    // EINVAL lets the loops below carry on to the next packet, but the output is then incomplete
+    // and the exit status has to say so.
+    let mut decode_error = false;
     let mut total: c_uint = 0;
     let mut fps: [c_uint; 2] = [0; 2];
     let mut timebase: [c_uint; 2] = [0; 2];
@@ -478,6 +481,7 @@ unsafe fn main_0(argc: c_int, argv: *const *mut c_char) -> c_int {
         if res < 0 {
             if res != -EAGAIN {
                 dav1d_data_unref(NonNull::new(&mut data));
+                decode_error = true;
                 fprintf(
                     stderr(),
                     b"Error decoding frame: %s\n\0" as *const u8 as *const c_char,
@@ -491,6 +495,7 @@ unsafe fn main_0(argc: c_int, argv: *const *mut c_char) -> c_int {
         res = dav1d_get_picture(c, NonNull::new(&mut p)).0;
         if res < 0 {
             if res != -EAGAIN {
+                decode_error = true;
                 fprintf(
                     stderr(),
                     b"Error decoding frame: %s\n\0" as *const u8 as *const c_char,
@@ -548,10 +553,14 @@ unsafe fn main_0(argc: c_int, argv: *const *mut c_char) -> c_int {
         dav1d_data_unref(NonNull::new(&mut data));
     }
     if res == 0 {
+        // End of stream: pictures still waiting for a later trigger frame are output below.
+        let mut end_of_stream: Dav1dData = Default::default();
+        dav1d_send_data(c, NonNull::new(&mut end_of_stream));
         while cli_settings.limit == 0 || n_out < cli_settings.limit {
             res = dav1d_get_picture(c, NonNull::new(&mut p)).0;
             if res < 0 {
                 if res != -EAGAIN {
+                    decode_error = true;
                     fprintf(
                         stderr(),
                         b"Error decoding frame: %s\n\0" as *const u8 as *const c_char,
@@ -624,7 +633,11 @@ unsafe fn main_0(argc: c_int, argv: *const *mut c_char) -> c_int {
     }
     dav1d_close(NonNull::new(&mut c));
     rusty_av2d::prof::report(); // stage table (no-op without the `profiling` feature)
-    return if res == 0 { 0 as c_int } else { 1 as c_int };
+    return if res == 0 && !decode_error {
+        0 as c_int
+    } else {
+        1 as c_int
+    };
 }
 
 /// The decoder allocates heavily -- roughly 190 sites across the decode path,

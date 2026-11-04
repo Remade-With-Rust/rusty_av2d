@@ -2520,6 +2520,38 @@ pub(crate) fn av2_pop_pending(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1d
     }
 }
 
+/// dav2d `queue_flush` (lib.c:326), AVM `flush_remaining_frames`: at end of stream, queue every
+/// implicit-show reference not yet output, in ascending poc.
+pub(crate) fn av2_queue_flush() {
+    use crate::av2_recon::{get_poc_diff, AV2_DPB_POC, CUR_REF_POC, REF_SLOTS};
+    let (nb, _, _) = CUR_REF_POC.with(|x| x.get());
+    let dpb = AV2_DPB_POC.with(|x| x.get());
+    let slots = REF_SLOTS.with(|s| *s.borrow());
+    let mut order: Vec<(usize, u32)> = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(n, sl)| {
+            let sl = sl.as_ref()?;
+            (sl.show_implicit && get_poc_diff(nb, sl.order_hint, dpb) > 0).then_some((n, sl.order_hint))
+        })
+        .collect();
+    order.sort_by_key(|&(_, poc)| get_poc_diff(nb, poc, dpb));
+    // One frame can sit in several reference slots.
+    order.dedup_by_key(|&mut (_, poc)| poc);
+    for &(n, _) in &order {
+        if let Some(p) = crate::av2_frame::REF_PICS.with(|rp| rp.borrow()[n].clone()) {
+            let mut p = crate::av2_frame::visible_planes(p);
+            if let Some((id, seed)) = crate::av2_grain::GRAIN_SLOTS.with(|g| g.borrow()[n]) {
+                crate::av2_grain::apply_grain_to_planes(&mut p, id, seed);
+            }
+            AV2_PENDING.with(|q| q.borrow_mut().push_back(p));
+        }
+    }
+    if let Some(&(_, poc)) = order.last() {
+        AV2_DPB_POC.with(|x| x.set(poc));
+    }
+}
+
 /// dav2d `dav2d_queue_output` (lib.c:353): on a SHOWN frame, first flush implicit-showable ref
 /// pictures with dpb_poc < poc < cur (ascending), then the trigger frame, then chase the
 /// `dpb_poc + 1` chain of implicit refs. First picture -> `state.out`, rest -> AV2_PENDING.
