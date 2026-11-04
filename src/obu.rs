@@ -870,7 +870,8 @@ fn parse_av2_frame_hdr_front(
         }
         // DC quantizer per plane = dq_lookup(clip(yac + dc_delta, 0, qmax)). qmax = 255 (8-bit;
         // hbd adds 48). Stored for the coefficient dequant (DC uses this, AC uses dq_lookup(yac)).
-        let qmax = 255 + 48 * (seq_hdr.hbd != 0) as i32;
+        let qmax = 255 + 48 * seq_hdr.hbd as i32;
+        crate::av2_frame::F2_QMAX.with(|c| c.set(qmax));
         let clipq = |d: i32| (yac as i32 + d).clamp(0, qmax) as u32;
         crate::av2_frame::F2_DCQ.with(|c| c.set([
             crate::av2_dequant::dq_lookup(clipq(ydc_delta)),

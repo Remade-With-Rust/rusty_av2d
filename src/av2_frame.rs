@@ -619,6 +619,8 @@ thread_local! {
     /// The frame's per-plane q deltas [ydc, udc, vdc, uac, vac] (obu quant section) — kept so the
     /// per-SB delta-q read can recompute F2_DCQ/F2_ACQ from the NEW qindex (dav init_quant_tables).
     pub static F2_QDELTAS: std::cell::Cell<[i32; 5]> = const { std::cell::Cell::new([0; 5]) };
+    /// Largest qindex for this stream's bit depth: AVM `MAXQ_8_BITS` / `MAXQ_10_BITS` / `MAXQ`.
+    pub static F2_QMAX: std::cell::Cell<i32> = const { std::cell::Cell::new(255) };
     /// Decode-order frame counter (incremented at each frame's LAST_QIDX reset) - probe gating.
     pub static DECODE_FRAME_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Seq-header `inter_ddt`: when set, inter blocks remap (flip)adst→(f)ddt in the itx

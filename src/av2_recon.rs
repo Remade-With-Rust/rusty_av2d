@@ -428,7 +428,9 @@ pub fn read_delta_q(
         let mut delta_q = rav1d_msac_decode_symbol_adapt8(msac, &mut cdf.m.delta_q, 7) as i32;
         if delta_q == 7 {
             let n_bits = 1 + rav1d_msac_decode_bools_bypass(msac, 3) as i32;
-            delta_q = rav1d_msac_decode_bools_bypass(msac, n_bits as u8) as i32 + 1 + (1 << n_bits);
+            // AVM `read_delta_qindex`: thr = (1 << rem_bits) + DELTA_Q_SMALL_MINUS_2, with
+            // DELTA_Q_SMALL = 7. (dav2d writes +1 here and so disagrees with AVM from abs 5 up.)
+            delta_q = rav1d_msac_decode_bools_bypass(msac, n_bits as u8) as i32 + 5 + (1 << n_bits);
         }
         if delta_q != 0 {
             if rav1d_msac_decode_bool_bypass(msac) {
@@ -436,7 +438,7 @@ pub fn read_delta_q(
             }
             delta_q *= 1 << cfg.delta_q_res_log2;
         }
-        let qmax = 255i32; // 8-bit (dav: 255 + 48*hbd — plumb hbd when a 10-bit delta-q clip exists)
+        let qmax = crate::av2_frame::F2_QMAX.with(|c| c.get());
         let new_qidx = (LAST_QIDX.with(|c| c.get()) as i32 + delta_q).clamp(1, qmax) as u32;
         LAST_QIDX.with(|c| c.set(new_qidx));
         // dav init_quant_tables(new_qidx): the per-plane DC/AC quantizers follow the NEW qindex
