@@ -255,6 +255,9 @@ pub fn deblock_plane(
     tile_v_x4: &[usize],
 ) {
     crate::prof_scope!(6);
+    // Filters must stay inside the frame (avm set_lpf_parameters clipped_ts): an edge closer to the
+    // far frame edge than 16px (luma) / 8px (chroma) is capped at that transform size.
+    let (far_edge_cells, far_edge_level) = if max_width.len() > 3 { (4, 2) } else { (2, 1) };
     let nbands = ih4.div_ceil(band_cells);
     for band in 0..nbands {
         if !crate::av2_recon::work_tick("deblock:255") { break; }
@@ -274,7 +277,10 @@ pub fn deblock_plane(
                 if !db_left[cell] {
                     continue;
                 }
-                let level = db_lw[cell].min(db_lw[cell - 1]) as usize;
+                let mut level = db_lw[cell].min(db_lw[cell - 1]) as usize;
+                if x4 + far_edge_cells > iw4 {
+                    level = level.min(far_edge_level);
+                }
                 let mwp = max_width[level];
 
                 let mwn = if tile_edge { band_neg_cap.min(mwp) } else { mwp };
@@ -331,7 +337,10 @@ pub fn deblock_plane(
                 if !db_top[cell] {
                     continue;
                 }
-                let level = db_lh[cell].min(db_lh[cell - iw4]) as usize;
+                let mut level = db_lh[cell].min(db_lh[cell - iw4]) as usize;
+                if y4 + far_edge_cells > ih4 {
+                    level = level.min(far_edge_level);
+                }
                 let mwp = max_width[level];
 
                 let mwn = if band_top { band_neg_cap.min(mwp) } else { mwp };

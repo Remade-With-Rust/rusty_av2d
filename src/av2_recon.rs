@@ -4355,6 +4355,9 @@ pub fn decode_leaf(
             fmv = if info.inter_mode == 16 {
                 let prec = if info.warpmv_with_mvd { info.mv_prec } else { 6 };
                 get_warpmv_2d(&warp[info.warp_ref_idx.min(3)], bx4 as i32, by4 as i32, bw4 as i32, bh4 as i32, col_end as i32, row_end as i32, prec)
+            } else if info.inter_mode == 14 && !comp {
+                // GLOBALMV (dav2d decode.c:1074): the global model, not the stack (identity → 0).
+                z
             } else {
                 stack[info.drl_idx].mv[0]
             };
