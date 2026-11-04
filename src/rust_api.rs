@@ -474,3 +474,62 @@ impl Debug for Picture {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The temporal units of an IVF file.
+    fn ivf_units(path: &str) -> Vec<Box<[u8]>> {
+        let file = std::fs::read(path).unwrap();
+        let mut units = Vec::new();
+        let mut pos = 32;
+        while pos + 12 <= file.len() {
+            let len = u32::from_le_bytes(file[pos..pos + 4].try_into().unwrap()) as usize;
+            units.push(file[pos + 12..pos + 12 + len].into());
+            pos += 12 + len;
+        }
+        units
+    }
+
+    fn drain(dec: &mut Decoder) -> usize {
+        let mut pictures = 0;
+        while dec.get_picture().is_ok() {
+            pictures += 1;
+        }
+        pictures
+    }
+
+    /// Feeds `units` as the README does, returning pictures output before and after `finish`.
+    fn decode(units: &[Box<[u8]>]) -> (usize, usize) {
+        let mut settings = Settings::new();
+        settings.set_n_threads(1);
+        let mut dec = Decoder::with_settings(&settings).unwrap();
+        let mut before = 0;
+        for unit in units {
+            let mut sent = dec.send_data(unit.clone(), None, None, None);
+            while matches!(sent, Err(Rav1dError::TryAgain)) {
+                before += drain(&mut dec);
+                sent = dec.send_pending_data();
+            }
+            sent.unwrap();
+            before += drain(&mut dec);
+        }
+        dec.finish().unwrap();
+        let after = drain(&mut dec);
+        dec.finish().unwrap();
+        assert_eq!(drain(&mut dec), 0, "a second finish has nothing left to output");
+        (before, after)
+    }
+
+    #[test]
+    fn finish_outputs_the_frames_still_pending_at_end_of_stream() {
+        let units = ivf_units(concat!(env!("CARGO_MANIFEST_DIR"), "/bench/conformance/corpus/r270x480_16f_q110.ivf"));
+        let (before, after) = decode(&units);
+        assert_eq!(before + after, 16, "every frame of the whole stream");
+
+        // Cut mid-GOP: the frames coded ahead of the cut only come out through finish().
+        let cut = (1..units.len()).map(|n| decode(&units[..n])).find(|&(_, after)| after > 0);
+        assert!(cut.is_some(), "no cut of this clip leaves frames pending");
+    }
+}

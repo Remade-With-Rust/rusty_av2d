@@ -621,6 +621,10 @@ thread_local! {
     pub static SEQ_TIP: std::cell::Cell<(u8, bool, u8, bool, bool)> = const { std::cell::Cell::new((0, false, 0, false, false)) };
     /// seq `tip_explicit_qp` (dav2d obu.c:490).
     pub static SEQ_TIP_QP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// seq `enable_imp_msk_bld`: border-aware masks for compound blocks reaching off-frame.
+    pub static SEQ_IMP_MSK_BLD: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+    /// seq `enable_global_motion`.
+    pub static SEQ_GLOBAL_MOTION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// seq `disable_loopfilters_across_tiles`.
     pub static SEQ_NO_LF_ACROSS_TILES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Number of frames DECODED so far (incremented after each frame). For a P-chain this equals
@@ -2805,7 +2809,7 @@ fn opfl_pred_luma(
     let di = (asign(1 + (d0 > d1) as i32, -refdist[refs[0]]), asign(1 + (d1 > d0) as i32, refdist[refs[1]]));
     // bs: opfl cell size in mi (dav: 2 - (b->bs == BS_8x8)); 8x8 blocks refine per 4px cell.
     let cbs: usize = if bw4 == 2 && bh4 == 2 { 1 } else { 2 };
-    let bacp = cwp == 8; // seq imp_msk_bld=1, no ref scaling
+    let bacp = cwp == 8 && SEQ_IMP_MSK_BLD.with(|c| c.get()); // no ref scaling
     if bacp {
         SEG_SCRATCH.with(|sc| sc.borrow_mut()[0] = 0xff);
     }
@@ -3057,7 +3061,7 @@ fn tip_pred_luma(
     let mut tmp = [vec![0i32; w * h], vec![0i32; w * h]];
     // bacp deferred marker (seq imp_msk_bld=1, TIP cwp==8, no scaling)
     let tip_wt = HDR_TOOL_CFG.with(|c| c.get()).tip_wt;
-    let bacp = tip_wt == 8;
+    let bacp = tip_wt == 8 && SEQ_IMP_MSK_BLD.with(|c| c.get());
     SEG_SCRATCH.with(|sc| sc.borrow_mut()[0] = 0xff);
     let mut have_bacp = false;
     // signed distance weights d (dav 2090-2092)
@@ -3317,7 +3321,7 @@ fn recon_inter_chroma(
                     let hvtaps = 2 + 2 * ((rh4 * pxh) > 4) as i32;
                     let h4c = cbh4.min(ih4.saturating_sub(cby));
                     let w4c = cbw4.min(_iw4.saturating_sub(cbx));
-                    let bacp = pl == 0 && bcwp == 8; // seq imp_msk_bld=1
+                    let bacp = pl == 0 && bcwp == 8 && SEQ_IMP_MSK_BLD.with(|c| c.get());
                     if bacp {
                         SEG_SCRATCH.with(|sc| sc.borrow_mut()[0] = 0xff);
                     }
@@ -3477,7 +3481,7 @@ fn recon_inter_chroma(
                             let oof = x0 < 0 || x1 < 0 || y0 < 0 || y1 < 0
                                 || x0 + cw as i32 >= fw_px || x1 + cw as i32 >= fw_px
                                 || y0 + ch as i32 >= fh_px || y1 + ch as i32 >= fh_px;
-                            if oof && !comp_no_bacp {
+                            if oof && !comp_no_bacp && SEQ_IMP_MSK_BLD.with(|c| c.get()) {
                                 SEG_SCRATCH.with(|sc| {
                                     let mut scr = sc.borrow_mut();
                                     if pl == 0 {
@@ -4933,7 +4937,7 @@ pub fn decode_leaf(
                                     let oof = x0 < 0 || x1 < 0 || y0 < 0 || y1 < 0
                                         || x0 + w as i32 >= fw_px || x1 + w as i32 >= fw_px
                                         || y0 + h as i32 >= fh_px || y1 + h as i32 >= fh_px;
-                                    let on = oof && info.motion_mode != 2 && info.inter_mode != 21;
+                                    let on = oof && info.motion_mode != 2 && info.inter_mode != 21 && SEQ_IMP_MSK_BLD.with(|c| c.get());
                                     if on {
                                         SEG_SCRATCH.with(|sc| {
                                             let mut scr = sc.borrow_mut();

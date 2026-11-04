@@ -839,6 +839,14 @@ fn parse_av2_frame_hdr_front(
         let _ = (allow_scc, allow_intrabc, disable_cdf_update);
 
         parse_frame_tile_info(gb, seq_hdr, width, height);
+        // Only the TIP-as-output deblock honours this flag. Refuse the frame rather than filter
+        // across the tile boundaries and output wrong pixels.
+        if crate::av2_recon::SEQ_NO_LF_ACROSS_TILES.with(|c| c.get())
+            && crate::av2_recon::TILE_INFO.with(|c| c.get().cols > 1 || c.get().rows > 1)
+        {
+            crate::dlog!("[rav2d AV2 framehdr] disable_loopfilters_across_tiles is not implemented");
+            return Err(Rav1dError::UnsupportedBitstream);
+        }
         crate::dlog!("F2HDR tiling off={}", gb.pos() - off_base);
         // --- quant: yac (obu.c:1434) ---
         let yac = gb.get_bits(8 + (seq_hdr.hbd != 0) as c_int);
@@ -922,6 +930,12 @@ fn parse_av2_frame_hdr_front(
         // [IS_INTER_OR_SWITCH secondary_ref derive: keyframe skips]
         // segmentation (obu.c:1477)
         let seg_enabled = gb.get_bit();
+        if seg_enabled {
+            // Per-block segment ids and per-segment q aren't implemented, so refuse the frame
+            // rather than desync the parse and output wrong pixels.
+            crate::dlog!("[rav2d AV2 framehdr] segmentation is not implemented");
+            return Err(Rav1dError::UnsupportedBitstream);
+        }
         if seg_enabled {
             let reuse = seq_hdr.av2.seg_info_present != 0
                 && (seq_hdr.av2.seg_adaptive == 0 || gb.get_bit());
@@ -1530,9 +1544,12 @@ fn parse_av2_frame_hdr_front(
         if is_inter_or_switch {
             crate::dlog!("F2HDR modebits off={}", gb.pos() - off_base);
         }
-        // global motion (obu.c:1960): `seqhdr.global_motion && get_bit` → gmv params. seq
-        // global_motion=0 for this clip → 0 bits (short-circuit). Plumb the seq flag + the
-        // per-ref warp params (needs n_ref_frames) when a stream enables global motion.
+        // AVM read_global_motion: the per-ref warp params aren't implemented, so refuse the frame
+        // rather than decode it with identity motion and output wrong pixels.
+        if is_inter_or_switch && crate::av2_recon::SEQ_GLOBAL_MOTION.with(|c| c.get()) && gb.get_bit() {
+            crate::dlog!("[rav2d AV2 framehdr] frame global motion is not implemented");
+            return Err(Rav1dError::UnsupportedBitstream);
+        }
         parse_frame_grain(gb, seq_hdr);
         crate::dlog!(
             "[rav2d AV2 framehdr] *** FRAME HEADER COMPLETE *** bit_error={} hdr_bits={}",
@@ -1773,7 +1790,7 @@ fn parse_seq_hdr(
         let seq_bawp = gb.get_bit(); // bawp (gates the FRAME bawp bit + intra-bawp/morph)
         if !reduced_still_picture_header {
             seq_cwp = gb.get_bit();
-            gb.get_bit(); // imp_msk_bld
+            crate::av2_recon::SEQ_IMP_MSK_BLD.with(|c| c.set(gb.get_bit()));
             db_sub_pu = gb.get_bit() as u8;
             if tip == 1 && db_sub_pu != 0 {
                 crate::av2_recon::SEQ_TIP_QP.with(|c| c.set(gb.get_bit())); // tip_explicit_qp
@@ -1795,7 +1812,7 @@ fn parse_seq_hdr(
             let seq_signd = gb.get_bit(); // mvd_sign_derive (gates MVD sign derivation)
             crate::av2_recon::SEQ_TOOLS.with(|c| { let mut t = c.get(); t.adaptive_mvd = seq_amvd; t.mvd_sign_derive = seq_signd; c.set(t); });
             gb.get_bit(); // flex_mvres
-            gb.get_bit(); // global_motion
+            crate::av2_recon::SEQ_GLOBAL_MOTION.with(|c| c.set(gb.get_bit()));
             short_refresh_frame_flags = gb.get_bit() as u8;
         }
         // screen content tools (535)
