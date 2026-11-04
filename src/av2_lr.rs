@@ -209,6 +209,7 @@ pub fn lr_filter_luma(
     let unit_sz_log2 = cfg.unit_size[0] as usize;
     let unit_sz = 1usize << unit_sz_log2;
     let units = LR_UNITS.with(|u| u.borrow().clone());
+    let unit_filters = LR_UNIT_FILTERS.with(|u| u.borrow().clone());
 
     // Source accessor: stripe-aware row resolution + frame-edge clamp. Stripes (single
     // tile): [0,56), then 64-row bands. Rows outside the current stripe: the 2 adjacent
@@ -267,6 +268,8 @@ pub fn lr_filter_luma(
                 x0 += 64;
                 continue;
             }
+            // With frame filters off each unit codes its own (see LR_UNIT_FILTERS).
+            let ns_filters = if pd.ffon { &pd.filter } else { unit_filters.get(&(0u8, ax, ay)).unwrap_or(&pd.filter) };
             // classification (PC-wiener or multi-class NS): per 4px block of the strip.
             let multi = u_type == REST_PC || (u_type == REST_NS && pd.num_classes > 1);
             let bh_blk = (sy1 - sy0).div_ceil(4);
@@ -330,9 +333,9 @@ pub fn lr_filter_luma(
                     for x in xs..xe {
                         let v = if u_type == REST_NS {
                             let filter: &[i8; 18] = if pd.num_classes > 1 {
-                                &pd.filter[classes[bxi] as usize]
+                                &ns_filters[classes[bxi] as usize]
                             } else {
-                                &pd.filter[0]
+                                &ns_filters[0]
                             };
                             let m = px(x as i32, y as i32);
                             let mut s = m << 7;

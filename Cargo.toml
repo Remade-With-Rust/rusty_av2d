@@ -52,6 +52,9 @@ bitdepth_16 = []
 # Stage profiler (docs/plan.md Phase 0): cumulative per-stage timers + a report
 # table. Zero cost when off (the default); diagnostics only, not for production.
 profiling = []
+# Per-symbol entropy trace to the file named by SYMTRACE, for diffing line-for-line
+# against the same probe in an instrumented avmdec. Diagnostics only.
+symtrace = []
 
 [profile.dev]
 panic = "abort"

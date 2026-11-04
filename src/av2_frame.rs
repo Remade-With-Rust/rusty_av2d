@@ -1669,6 +1669,16 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         });
     }
     // ---- 1. DEBLOCK (all planes, in place) ----
+    // MPRE: per-decode-frame all-plane PRE-filter dump, the pair of avm PREFDUMP=path.
+    if let Ok(path) = std::env::var("MPRE") {
+        thread_local! { static PRE_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
+        let n = PRE_N.with(|c| { let v = c.get(); c.set(v + 1); v });
+        let mut out: Vec<u8> = Vec::with_capacity(w * h * 3 / 2);
+        for p in [&pl0, &pl1, &pl2] {
+            out.extend(p.iter().map(|v| (*v).clamp(0, 255) as u8));
+        }
+        let _ = std::fs::write(format!("{path}_{n}.yuv"), &out);
+    }
     if let Ok(path) = std::env::var("MDUMP_RECON") {
         use std::io::Write;
         let mut f = std::fs::File::create(path).unwrap();

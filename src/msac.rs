@@ -197,6 +197,31 @@ pub fn rav1d_msac_decode_uniform(s: &mut MsacContext, n: c_uint) -> c_int {
     }) as c_int
 }
 
+/// Per-symbol entropy trace (`--features symtrace`, output file from `SYMTRACE`): one
+/// line per CDF symbol with the post-renormalization `rng`, one per bypass read.
+/// Unbuffered, so the tail survives an abort at the point of interest.
+#[cfg(feature = "symtrace")]
+pub mod symtrace {
+    use std::io::Write;
+    use std::sync::Mutex;
+    static OUT: Mutex<Option<std::fs::File>> = Mutex::new(None);
+    pub fn emit(args: std::fmt::Arguments<'_>) {
+        let mut out = OUT.lock().unwrap();
+        if out.is_none() {
+            let path = std::env::var("SYMTRACE").unwrap_or_else(|_| "symtrace.txt".into());
+            *out = Some(std::fs::File::create(path).unwrap());
+        }
+        out.as_mut().unwrap().write_fmt(args).unwrap();
+    }
+}
+
+macro_rules! symtrace {
+    ($($arg:tt)*) => {
+        #[cfg(feature = "symtrace")]
+        symtrace::emit(format_args!($($arg)*));
+    };
+}
+
 const EC_PROB_SHIFT: c_uint = 6;
 const EC_MIN_PROB: c_uint = 4;
 
@@ -301,6 +326,7 @@ fn rav1d_msac_decode_bool_rust(s: &mut MsacContext, f: c_uint) -> bool {
     dif -= (ret as EcWin) * vw;
     v = v.wrapping_add((ret as c_uint) * (r.wrapping_sub(2 * v)));
     ctx_norm(s, dif, v);
+    symtrace!("S {}\n", s.rng);
     !ret
 }
 
@@ -329,6 +355,7 @@ pub fn rav1d_msac_decode_bools_bypass(s: &mut MsacContext, n_bits: u8) -> c_uint
     }
     s.dif = (((dif + 1) << n_bits) - 1) as EcWin;
     s.cnt -= n_bits as c_int;
+    symtrace!("B {n_bits} {ret}\n");
     ret
 }
 
@@ -365,6 +392,7 @@ pub fn rav1d_msac_decode_unary_bypass(s: &mut MsacContext, max_bits: u32) -> u32
     }
     s.dif = (((dif + 1) << bit) - 1) as EcWin;
     s.cnt -= bit as c_int;
+    symtrace!("U {max_bits} {ret}\n");
     ret
 }
 
@@ -413,6 +441,7 @@ fn rav1d_msac_decode_symbol_adapt_rust(s: &mut MsacContext, cdf: &mut [u16], n_s
         s.dif.wrapping_sub((v as EcWin) << (EC_WIN_SIZE - 16)),
         u - v,
     );
+    symtrace!("S {}\n", s.rng);
     if s.allow_update_cdf() {
         // AV2 table-driven rate (dav2d) + (n>2) bump; count slot holds rate-ctx<<8|count.
         let pc = cdf[n_symbols as usize];

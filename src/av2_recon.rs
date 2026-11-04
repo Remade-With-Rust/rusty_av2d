@@ -80,6 +80,7 @@ pub fn ii_blend(
     lw4: usize,
     lh4: usize,
     mode: i8,
+    wedge: i32,
 ) {
     const WTS: [u8; 64] = [
         60, 56, 52, 48, 45, 42, 39, 37, 34, 32, 30, 28, 26, 24, 22, 21,
@@ -170,6 +171,15 @@ pub fn ii_blend(
             1 => crate::av2_ipred::ipred_v(&mut intra, w, &top, w, h),
             2 => crate::av2_ipred::ipred_h(&mut intra, w, &left, w, h),
             _ => crate::av2_ipred::ipred_smooth(&mut intra, w, &top, &left, w, h),
+        }
+        // dav iiblend: a wedge block blends with the wedge codebook mask of the luma-size block.
+        if wedge >= 0 {
+            let mask = crate::av2_wedge::wedge_mask(lw4, lh4, wedge as usize, ssh + ssv);
+            for (i, p) in pred[..w * h].iter_mut().enumerate() {
+                let m = mask[i] as i32;
+                *p = (*p * (64 - m) + intra[i] * m + 32) >> 6;
+            }
+            return;
         }
         // II mask (dav wedge.c build_nondc_ii_masks; step = 64/max(w,h); DC = flat 32).
         let step = 64 / w.max(h);
@@ -1090,7 +1100,7 @@ pub fn tip_recon_sb(bx4: usize, by4: usize, iw4: usize, ih4: usize) {
     let opfl = seq_tip_refine && (cfg.tip_frame_mode == 1 || cfg.tip_subpel_filter == 2);
     let step = 2usize << (!opfl as usize);
     let tip_arg = Some((step, step, true, iw4, ih4));
-    recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, None, filter, false, None, None, None, tip_arg, -1);
+    recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, None, filter, false, None, None, None, tip_arg, -1, -1);
 }
 
 /// dav2d `derive_pri_sec_ref` (obu.c:929): when primary_ref_frame is NOT signaled, it is derived
@@ -2260,7 +2270,7 @@ fn decode_b_key_yuv(
         let (ccbx, ccby) = (bx4 >> sshc, by4 >> ssvc);
         recon_intra_chroma(
             ccbx, ccby, bx4, by4, bw4, bh4, cc.slw, cc.slh, cm.uv_mode, cm.uv_angle, cm.cfl_mode,
-            cm.cfl_alpha_u, cm.cfl_alpha_v, cm.mh_dir, &cc.cf_u, &cc.cf_v, cc.u_eob == -1, cc.v_eob == -1,
+            cm.cfl_alpha_u, cm.cfl_alpha_v, cm.mh_dir, &cc.cf_u, &cc.cf_v, cc.u_eob == -1, cc.v_eob == -1, cc.cctx,
             ccbx > TILE_B.with(|t| t.get().0 >> sshc), ccby > TILE_B.with(|t| t.get().2 >> ssvc),
         );
         crate::av2_frame::FRAME.with(|f| {
@@ -2418,7 +2428,7 @@ pub fn decode_b_chroma(
     }
     let mut cf_u = vec![0i32; 1usize << (slw + slh + 4)];
     if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=1 txs={t_dim_ctx} skipctx={sctx_u} rng={}", msac.rng); }
-    let (u_eob, cf_ctx_u) = crate::av2_coef::decode_coefs_uv(
+    let (u_eob, cf_ctx_u, cctx) = crate::av2_coef::decode_coefs_uv(
         msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_u, 1, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_u, 0, true, 0,
     );
     if cc96 { crate::av2_coef::COEF_DBG.with(|c| c.set(false)); crate::dlog!("[CC96] post-U eob={u_eob} rng={} dif={:x}", msac.rng, msac.dif); }
@@ -2440,7 +2450,7 @@ pub fn decode_b_chroma(
     );
     let mut cf_v = vec![0i32; 1usize << (slw + slh + 4)];
     if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=2 txs={t_dim_ctx} skipctx={sctx_v} rng={}", msac.rng); }
-    let (v_eob, cf_ctx_v) = crate::av2_coef::decode_coefs_uv(
+    let (v_eob, cf_ctx_v, _) = crate::av2_coef::decode_coefs_uv(
         msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_v, 2, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_v, 0, true, 0,
     );
     if ct48 { crate::dlog!("[CT48] sctx_v={sctx_v} post-V v_eob={v_eob} r={}", msac.rng); }
@@ -2451,7 +2461,7 @@ pub fn decode_b_chroma(
     let (lbw4, lbh4) = (bdc0[0] as usize, bdc0[1] as usize); // luma block dims (for availability)
     recon_intra_chroma(
         cbx4, cby4, bx4, by4, lbw4, lbh4, slw, slh, uv_mode, uv_angle, cfl_mode, cfl_alpha_u, cfl_alpha_v, mh_dir,
-        &cf_u, &cf_v, u_eob == -1, v_eob == -1,
+        &cf_u, &cf_v, u_eob == -1, v_eob == -1, cctx,
         cbx4 > TILE_B.with(|t| t.get().0 >> 1), cby4 > TILE_B.with(|t| t.get().2 >> 1),
     );
     (uv_mode, uv_angle)
@@ -2616,7 +2626,7 @@ fn decode_chroma_coefs(
     if d240 { crate::dlog!("CC240 pl=U sctx={sctx_u} tctx={t_dim_ctx} cbw4={cbw4} cbh4={cbh4} cbx4={cbx4} cby4={cby4} a[{cbx4}..{}]={:?} l[{cby4}..{}]={:?} (dav sctx=6)", cbx4+cbw4, &cnb.a[0][cbx4..cbx4+cbw4], cby4+cbh4, &cnb.l[0][cby4..cby4+cbh4]); }
     let mut cf_u = vec![0i32; 1usize << (slw + slh + 4)];
     if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=1 txs={t_dim_ctx} skipctx={sctx_u} rng={}", msac.rng); }
-    let (u_eob, cfc_u) = crate::av2_coef::decode_coefs_uv(msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_u, 1, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_u, u_skip_set, intra, tx_class);
+    let (u_eob, cfc_u, cctx) = crate::av2_coef::decode_coefs_uv(msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_u, 1, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_u, u_skip_set, intra, tx_class);
     if d240 { crate::dlog!("CC240 pl=U DONE u_eob={u_eob} rng={} dif={:x}", msac.rng, msac.dif); }
     if dcc {
         let nz: Vec<(usize, i32)> = cf_u.iter().enumerate().filter(|(_, &v)| v != 0).map(|(i, &v)| (i, v)).collect();
@@ -2627,12 +2637,12 @@ fn decode_chroma_coefs(
     let sctx_v = crate::av2_coef::skip_ctx_chroma(&cnb.a[1], &cnb.l[1], cbx4, cby4, cbw4, cbh4, 2, u_eob != -1, false);
     let mut cf_v = vec![0i32; 1usize << (slw + slh + 4)];
     if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=2 txs={t_dim_ctx} skipctx={sctx_v} rng={}", msac.rng); }
-    let (_v_eob, cfc_v) = crate::av2_coef::decode_coefs_uv(msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_v, 2, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_v, 0, intra, tx_class);
+    let (_v_eob, cfc_v, _) = crate::av2_coef::decode_coefs_uv(msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_v, 2, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_v, 0, intra, tx_class);
     cnb.a[1][cbx4..cbx4 + cbw4s].fill(cfc_v);
     cnb.l[1][cby4..cby4 + cbh4s].fill(cfc_v);
     if dcc { crate::dlog!("[CC] post-v v_eob={_v_eob} rng={} dif={:x} cf_v[0..6]={:?}", msac.rng, msac.dif, &cf_v[..6]); }
     if d240 { crate::av2_coef::COEF_DBG.with(|c| c.set(false)); }
-    ChromaCoefs { cf_u, cf_v, u_eob, v_eob: _v_eob, uv_txtp, slw, slh }
+    ChromaCoefs { cf_u, cf_v, u_eob, v_eob: _v_eob, cctx, uv_txtp, slw, slh }
 }
 
 /// The decoded chroma coefficients + inherited txtp for a yuv leaf, returned by
@@ -2643,6 +2653,9 @@ struct ChromaCoefs {
     cf_v: Vec<i32>,
     u_eob: i32,
     v_eob: i32,
+    /// Cross-chroma transform type, 0 = none. Otherwise both planes carry a residual, even a
+    /// plane whose eob is -1.
+    cctx: u8,
     uv_txtp: u8,
     slw: usize,
     slh: usize,
@@ -3197,6 +3210,7 @@ fn recon_inter_chroma(
     tip: Option<(usize, usize, bool, usize, usize)>,
     // Inter-intra blend mode (-1 = off): dav chroma iiblend (recon 3731), after MC, else-of-bawp.
     ii_mode: i8,
+    ii_wedge: i32,
 ) {
     // `bx4`/`by4` = LUMA block pos (for the warp matrix eval); `cpx`/`cpy`/`cw`/`ch` = the chroma
     // block's pixel origin + dims (for a sub-8×8 shared chroma these come from the 8×8 carrier).
@@ -3497,12 +3511,11 @@ fn recon_inter_chroma(
                     let (sshc, ssvc) = ss_g();
                     let (lx4, ly4) = ((cpx << sshc) >> 2, (cpy << ssvc) >> 2);
                     let (lw4, lh4) = ((cw << sshc) >> 2, (ch << ssvc) >> 2);
-                    ii_blend(&mut buf, pl + 1, cpx, cpy, cw, ch, lx4, ly4, lw4, lh4, ii_mode);
+                    ii_blend(&mut buf, pl + 1, cpx, cpy, cw, ch, lx4, ly4, lw4, lh4, ii_mode, ii_wedge);
                 }
                 // Residual (dequant chroma levels → inv transform → add). uv_txtp is dav's packed
                 // chroma TxfmType; apply the inter_ddt DDT mask then the DAV2MINE 1d-index remap.
                 if let Some(cc) = cc {
-                    let cf = if pl == 0 { &cc.cf_u } else { &cc.cf_v };
                     let (slw, slh) = (cc.slw, cc.slh);
                     let (tw, th) = (4usize << slw, 4usize << slh);
                     let n = tw * th;
@@ -3519,18 +3532,22 @@ fn recon_inter_chroma(
                     }
                     const DAV2MINE: [usize; 8] = [0, 3, 1, 2, 4, 5, 6, 7];
                     let (row_ty, col_ty) = (DAV2MINE[(txtp & 7) as usize], DAV2MINE[((txtp >> 5) & 7) as usize]);
-                    let iqm = crate::av2_qm::iqm_slice(pl + 1, tw, th, row_ty != 3 && col_ty != 3);
-                    let mut coeff = crate::scratch::zeroed(n);
-                    for i in 0..n.min(cf.len()) {
-                        let lvl = cf[i];
-                        if lvl != 0 {
-                            let s = (lvl < 0) as u32;
-                            let q = crate::av2_qm::qm_apply(iqm, i, th.min(32), dq);
-                            let mag0 = dequant_coeff(lvl.unsigned_abs(), q, 3, cfmax, s, false) as i32;
-                            let mag = (mag0 >> tx_scale).min(cfmax);
-                            coeff[i] = if lvl < 0 { -mag } else { mag };
+                    let coeff = crate::av2_stx::chroma_coeffs(pl, cc.cctx, bdmax_g(), |p| {
+                        let cf = if p == 0 { &cc.cf_u } else { &cc.cf_v };
+                        let iqm = crate::av2_qm::iqm_slice(p + 1, tw, th, row_ty != 3 && col_ty != 3);
+                        let mut coeff = crate::scratch::zeroed(n);
+                        for i in 0..n.min(cf.len()) {
+                            let lvl = cf[i];
+                            if lvl != 0 {
+                                let s = (lvl < 0) as u32;
+                                let q = crate::av2_qm::qm_apply(iqm, i, th.min(32), dq);
+                                let mag0 = dequant_coeff(lvl.unsigned_abs(), q, 3, cfmax, s, false) as i32;
+                                let mag = (mag0 >> tx_scale).min(cfmax);
+                                coeff[i] = if lvl < 0 { -mag } else { mag };
+                            }
                         }
-                    }
+                        coeff
+                    });
                     let mut residual = crate::scratch::zeroed(n);
                     crate::av2_itx::inv_txfm_2d(&coeff, slw, slh, row_ty, col_ty, &mut residual);
                     if std::env::var("CQD").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == cpx && p[1] == cpy }) {
@@ -3937,7 +3954,7 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
     let (w, h) = (bw4 * 4, bh4 * 4);
     let yac = LAST_QIDX.with(|c| c.get()); // delta-q: the current SB's effective qindex (== frame yac when delta-q is off)
     // Dequant + inverse-transform a coef block into `residual` (intrabc = intra, so NO DDT remap).
-    let build_residual = |cf: &[i32], tw: usize, th: usize, txtp0: u8, slw: usize, slh: usize, dcq: u32, stx: u8, eob: i32, plane: usize| -> Vec<i32> {
+    let dequant = |cf: &[i32], tw: usize, th: usize, txtp0: u8, dcq: u32, plane: usize| {
         let n = tw * th;
         let dq = dq_lookup(yac);
         let tx_scale = (n > 256) as u32 + (n > 1024) as u32;
@@ -3958,28 +3975,15 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
                 coeff[i] = if lvl < 0 { -mag } else { mag };
             }
         }
-        // Secondary transform (STX/IST) on the dequantized coeffs before the primary itx — same as
-        // the inter path (dav2d stx_tmpl.c stxfm8, set=0, transpose). intrabc (≥16×16 DCT_DCT) too.
+        coeff
+    };
+    let build_residual = |mut coeff: crate::scratch::Scratch, tw: usize, th: usize, txtp0: u8, slw: usize, slh: usize, stx: u8, eob: i32| -> Vec<i32> {
+        let n = tw * th;
+        // Secondary transform (STX/IST) on the dequantized coeffs before the primary itx: set 0 and
+        // always transposed, like the inter path (dav2d recon_tmpl.c:2707).
         if stx > 0 {
-            let ty = (stx - 1) as usize;
-            let kernel = &crate::av2_stx_tables::STX_8X8_KERNEL_SET0[ty];
-            let map_idx = crate::av2_stx_tables::COEFF8X8_MAPPING_IDX[ty] as usize;
-            let mapping = &crate::av2_stx_tables::COEFF8X8_MAPPING[map_idx];
-            let stride = th.min(32);
-            let hh = (eob + 1) as usize;
-            let (cmin, cmax) = (-128 * 256, 128 * 256 - 1);
-            let mut sums = [0i32; 48];
-            for (x, sx) in sums.iter_mut().enumerate() {
-                let mut sum = 0i32;
-                for y in 0..hh { sum += coeff[y] * kernel[y][x] as i32; }
-                let m = (sum.abs() + 64) >> 7;
-                *sx = (if sum < 0 { -m } else { m }).clamp(cmin, cmax);
-            }
-            for c in coeff.iter_mut().take(32) { *c = 0; }
-            for (n_i, &rc) in mapping.iter().enumerate() {
-                let (x, y) = ((rc & 7) as usize, (rc >> 3) as usize);
-                if stride > 8 { coeff[y * stride + x] = sums[n_i]; } else { coeff[rc as usize] = sums[n_i]; }
-            }
+            let scan = crate::av2_tables_gen::SCANS[scan_idx_square(slw.min(3), slh.min(3))];
+            crate::av2_stx::apply_stx(&mut coeff, scan, tw, th, true, stx, 0, bdmax_g());
         }
         // intrabc is an INTRA block (dav2d `b->intra == 1`), so it does NOT apply the inter DDT
         // remap (`txtp += txtp & tx_ddt_mask` is gated on `!b->intra`, recon_tmpl.c:2713). Its
@@ -4032,14 +4036,14 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
                 }
                 if u.all_zero { continue; }
                 let (uw, uh) = (4usize << u.slw, 4usize << u.slh);
-                let residual = build_residual(&u.cf, uw, uh, u.txtp, u.slw, u.slh, dcq, u.stx, u.eob, 0);
+                let residual = build_residual(dequant(&u.cf, uw, uh, u.txtp, dcq, 0), uw, uh, u.txtp, u.slw, u.slh, u.stx, u.eob);
                 let off = u.uy4 * 4 * w + u.ux4 * 4;
                 crate::av2_itx::residual_add(&mut pred[off..], w, &residual, uw.min(w - u.ux4 * 4), uh.min(h - u.uy4 * 4), 0, 0, 0, bdmax_g());
             }
         } else if !all_zero && !luma_cf.is_empty() {
             f.mark_lr_noskip(bx4, by4, bw4, bh4);
             let dcq = crate::av2_frame::F2_DCQ.with(|c| c.get()[0]);
-            let residual = build_residual(luma_cf, w, h, luma_txtp, slw, slh, dcq, luma_stx, luma_eob, 0);
+            let residual = build_residual(dequant(luma_cf, w, h, luma_txtp, dcq, 0), w, h, luma_txtp, slw, slh, luma_stx, luma_eob);
             crate::av2_itx::residual_add(&mut pred, w, &residual, w, h, 0, 0, 0, bdmax_g());
             if std::env::var("MPROBE2").is_ok() && bx4 * 4 == 192 && by4 * 4 == 48 {
                 crate::dlog!("[MPROBE2] res_row0={:?} recon_row0={:?}", &residual[..8], &pred[..8]);
@@ -4083,10 +4087,14 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
             // odd pixel count; the wrong filter gave a ±2 error on every subpel intrabc chroma block.
             crate::av2_inter::mc_translate(&f.pl[pl + 1], &mut cpred, cw, cpx, cpy, cw, ch, bv.0, bv.1, 5, ss_g().0 as u32, ss_g().1 as u32, bdmax_g());
             if let Some(cc) = cc {
-                let cf = if pl == 0 { &cc.cf_u } else { &cc.cf_v };
                 let (tw, th) = (4usize << cc.slw, 4usize << cc.slh);
-                let dcq = crate::av2_frame::F2_DCQ.with(|c| c.get()[pl + 1]);
-                let residual = build_residual(cf, tw, th, cc.uv_txtp, cc.slw, cc.slh, dcq, 0, if pl == 0 { cc.u_eob } else { cc.v_eob }, pl + 1);
+                let coeff = crate::av2_stx::chroma_coeffs(pl, cc.cctx, bdmax_g(), |p| {
+                    let dcq = crate::av2_frame::F2_DCQ.with(|c| c.get()[p + 1]);
+                    dequant(if p == 0 { &cc.cf_u } else { &cc.cf_v }, tw, th, cc.uv_txtp, dcq, p + 1)
+                });
+                // Rotation spreads the coded coefficients over both planes (dav2d recon_tmpl.c:3995).
+                let eob = if cc.cctx != 0 { cc.u_eob.max(cc.v_eob) } else if pl == 0 { cc.u_eob } else { cc.v_eob };
+                let residual = build_residual(coeff, tw, th, cc.uv_txtp, cc.slw, cc.slh, 0, eob);
                 crate::av2_itx::residual_add(&mut cpred, cw, &residual, tw, th, 0, 0, 0, bdmax_g());
             }
             let cs = f.pl[pl + 1].stride;
@@ -4869,7 +4877,7 @@ pub fn decode_leaf(
                     // Inter-intra blend (dav recon_tmpl.c:3253: `else if (mm == MM_INTERINTRA ||
                     // b->warp_ii) iiblend(...)` — after MC/warp, else-of-bawp, single-ref non-TIP).
                     if info.ii_mode >= 0 && info.bawp == 0 && !info.is_tip {
-                        ii_blend(&mut luma_pred, 0, bx4 * 4, by4 * 4, w, h, bx4, by4, bw4, bh4, info.ii_mode);
+                        ii_blend(&mut luma_pred, 0, bx4 * 4, by4 * 4, w, h, bx4, by4, bw4, bh4, info.ii_mode, info.ii_wedge);
                     }
                 }
             }
@@ -4971,27 +4979,11 @@ pub fn decode_leaf(
                         coeff[i] = if lvl < 0 { -mag } else { mag };
                     }
                 }
-                // Inter secondary transform (STX/IST) on the dequantized unit coeffs.
+                // Inter secondary transform (STX/IST) on the dequantized unit coeffs: set 0, always
+                // transposed (dav2d recon_tmpl.c:2707).
                 if *ustx > 0 {
-                    let ty = (*ustx - 1) as usize;
-                    let kernel = &crate::av2_stx_tables::STX_8X8_KERNEL_SET0[ty];
-                    let map_idx = crate::av2_stx_tables::COEFF8X8_MAPPING_IDX[ty] as usize; // set=0
-                    let mapping = &crate::av2_stx_tables::COEFF8X8_MAPPING[map_idx];
-                    let stride = uh.min(32);
-                    let hh = (*ueob + 1) as usize;
-                    let (cmin, cmax) = (-128 * 256, 128 * 256 - 1);
-                    let mut sums = [0i32; 48];
-                    for (x, sx) in sums.iter_mut().enumerate() {
-                        let mut sum = 0i32;
-                        for y in 0..hh { sum += coeff[y] * kernel[y][x] as i32; }
-                        let m = (sum.abs() + 64) >> 7;
-                        *sx = (if sum < 0 { -m } else { m }).clamp(cmin, cmax);
-                    }
-                    for c in coeff.iter_mut().take(32) { *c = 0; }
-                    for (n_i, &rc) in mapping.iter().enumerate() {
-                        let (x, y) = ((rc & 7) as usize, (rc >> 3) as usize);
-                        if stride > 8 { coeff[y * stride + x] = sums[n_i]; } else { coeff[rc as usize] = sums[n_i]; }
-                    }
+                    let scan = crate::av2_tables_gen::SCANS[scan_idx_square((*uslw).min(3), (*uslh).min(3))];
+                    crate::av2_stx::apply_stx(&mut coeff, scan, uw, uh, true, *ustx, 0, bdmax_g());
                 }
                 // Packed TxfmType -> per-axis 1d types (+ inter DDT remap), per unit dims.
                 let mut txtp = *utxtp;
@@ -5200,7 +5192,7 @@ pub fn decode_leaf(
             } else { None };
             // Inter-intra chroma blend: single-ref non-TIP only (mirrors the luma gate).
             let cii = if info.ref1 < 0 && !info.is_tip && info.bawp == 0 { info.ii_mode } else { -1 };
-            recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, warp_pred, info.filter, cbs != bs as i32, chroma_coefs.as_ref(), bawp_alpha, comp_arg, tip_arg, cii);
+            recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, warp_pred, info.filter, cbs != bs as i32, chroma_coefs.as_ref(), bawp_alpha, comp_arg, tip_arg, cii, info.ii_wedge);
             // Sub-PU deblock CHROMA layer — AFTER the chroma recon (recon_inter_chroma's
             // mark_db_chroma writes the chroma edge grids; the caps must land on top of them).
             let dcfg2 = crate::av2_frame::DEBLOCK_CFG.with(|c| c.get());
@@ -5415,7 +5407,7 @@ pub fn decode_leaf(
             let (ccbx, ccby) = (bx4 >> sshc, by4 >> ssvc);
             recon_intra_chroma(
                 ccbx, ccby, bx4, by4, bw4, bh4, cc.slw, cc.slh, cm.uv_mode, cm.uv_angle, cm.cfl_mode,
-                cm.cfl_alpha_u, cm.cfl_alpha_v, cm.mh_dir, &cc.cf_u, &cc.cf_v, cc.u_eob == -1, cc.v_eob == -1,
+                cm.cfl_alpha_u, cm.cfl_alpha_v, cm.mh_dir, &cc.cf_u, &cc.cf_v, cc.u_eob == -1, cc.v_eob == -1, cc.cctx,
                 ccbx > TILE_B.with(|t| t.get().0 >> sshc), ccby > TILE_B.with(|t| t.get().2 >> ssvc),
             );
             // Mark the CHROMA deblock edge grids for an INTRA leaf inside an INTER frame — the
@@ -5925,6 +5917,36 @@ const H_ADST: u8 = 50;
 const H_FLIPADST: u8 = 51;
 const IDTX_TT: u8 = 33;
 const PAETH_PRED: u8 = 12;
+/// Intra STX set remap, `[y_mode][coded symbol]` (dav2d `inv_most_probable_stx_mapping`).
+const INV_STX_SET_MAP: [[u8; 7]; 12] = [
+    [6, 1, 0, 5, 4, 3, 2], // DC
+    [1, 6, 0, 4, 2, 5, 3], // V
+    [1, 6, 0, 4, 2, 5, 3], // H
+    [2, 6, 0, 5, 1, 4, 3], // D45
+    [3, 4, 6, 1, 0, 2, 5], // D135
+    [4, 1, 3, 6, 0, 5, 2], // D113
+    [4, 1, 3, 6, 0, 5, 2], // D157
+    [5, 0, 6, 2, 1, 4, 3], // D203
+    [5, 0, 6, 2, 1, 4, 3], // D67
+    [6, 1, 0, 5, 4, 3, 2], // SMOOTH
+    [1, 6, 0, 4, 2, 5, 3], // SMOOTH_V
+    [1, 6, 0, 4, 2, 5, 3], // SMOOTH_H
+];
+/// The reduced ADST_ADST (>=8x8) set remap (dav2d `inv_most_probable_stx_mapping_adst`).
+const INV_STX_SET_MAP_ADST: [[u8; 4]; 12] = [
+    [3, 1, 0, 2], // DC
+    [1, 3, 0, 2], // V
+    [1, 3, 0, 2], // H
+    [1, 3, 0, 2], // D45
+    [0, 2, 3, 1], // D135
+    [2, 1, 0, 3], // D113
+    [2, 1, 0, 3], // D157
+    [1, 0, 3, 2], // D203
+    [1, 0, 3, 2], // D67
+    [3, 1, 0, 2], // SMOOTH
+    [1, 3, 0, 2], // SMOOTH_V
+    [1, 3, 0, 2], // SMOOTH_H
+];
 
 /// Directional prediction angle (avm `wide_angle_mapping`): base `mode_to_angle_map[mode]` +
 /// scaled angle-delta + `mrl_index_to_delta`, then the wide-angle remap (±180) for rectangular
@@ -6463,8 +6485,8 @@ fn recon_intra_luma(
     multi_mrl: bool,
     cf: &[i32],
     txtp: u8,
-    _stx_type: u8,
-    _stx_set: u8,
+    stx_type: u8,
+    stx_set: u8,
     all_zero: bool,
     fsc: bool,
     have_left: bool,
@@ -6676,7 +6698,7 @@ fn recon_intra_luma(
             use crate::av2_dequant::{cf_max, dequant_coeff, dq_lookup};
             let dq = dq_lookup(LAST_QIDX.with(|c| c.get())); // delta-q: current SB's qindex (== frame yac when off)
             if std::env::var("MPROBE").is_ok() && px0 <= 349 && 349 < px0 + w && py0 <= 29 && 29 < py0 + h {
-                crate::dlog!("[MPROBE] px0={px0} py0={py0} w={w} h={h} mode={y_mode_idx} qidx={} dq={dq} dcq={} stx={_stx_type} txtp={txtp} nz={:?}",
+                crate::dlog!("[MPROBE] px0={px0} py0={py0} w={w} h={h} mode={y_mode_idx} qidx={} dq={dq} dcq={} stx={stx_type} txtp={txtp} nz={:?}",
                     LAST_QIDX.with(|c| c.get()), crate::av2_frame::F2_DCQ.with(|c| c.get()[0]),
                     cf.iter().take(64).enumerate().filter(|(_, &v)| v != 0).map(|(i, &v)| (i, v)).collect::<Vec<_>>());
             }
@@ -6704,9 +6726,19 @@ fn recon_intra_luma(
                     coeff[i] = if lvl < 0 { -mag } else { mag };
                 }
             }
+            if stx_type > 0 {
+                // dav2d keys the transpose on the wide-angle-remapped mode (recon_tmpl.c:2545,2705).
+                let stx_mode = if is_dir {
+                    wide_angle_remap_mode(y_mode, (recon_midx % 7) as i32 - 3, mrl_index, w, h)
+                } else {
+                    y_mode
+                };
+                let scan = crate::av2_tables_gen::SCANS[scan_idx_square(slw.min(3), slh.min(3))];
+                crate::av2_stx::apply_stx(&mut coeff, scan, w, h, crate::av2_stx::intra_transpose(stx_mode), stx_type, stx_set, bdmax);
+            }
             if std::env::var("MDQDUMP").map_or(false, |v| v == format!("{bx4},{by4}")) {
                 let nz: Vec<(usize, i32)> = coeff.iter().enumerate().filter(|(_, &v)| v != 0).map(|(i, &v)| (i, v)).collect();
-                crate::dlog!("[MDQDUMP] ({bx4},{by4}) w={w} h={h} txtp={txtp} dq={dq} dcq={dcq} tx_scale={tx_scale} stx={_stx_type} slw={slw} slh={slh} nz={nz:?}");
+                crate::dlog!("[MDQDUMP] ({bx4},{by4}) w={w} h={h} txtp={txtp} dq={dq} dcq={dcq} tx_scale={tx_scale} stx={stx_type} slw={slw} slh={slh} nz={nz:?}");
             }
             let (row_ty, col_ty) = if fsc {
                 (3, 3) // IDTX: identity/identity
@@ -6747,7 +6779,7 @@ fn recon_intra_luma(
                 if !ok {
                     let ang = if is_dir { p_angle } else { -1 };
                     crate::dlog!(
-                        "REFMISS px=({},{}) w={w} h={h} mode={y_mode} ang={ang} az={} fsc={} mrl={mrl_index} txtp={txtp} stx={_stx_type} | mine[0]={} dav[0]={}",
+                        "REFMISS px=({},{}) w={w} h={h} mode={y_mode} ang={ang} az={} fsc={} mrl={mrl_index} txtp={txtp} stx={stx_type} | mine[0]={} dav[0]={}",
                         px0, py0, all_zero as u8, fsc as u8,
                         pred[0].clamp(0, 255), rp.at(px0, py0)
                     );
@@ -7334,6 +7366,7 @@ fn recon_intra_chroma(
     cf_v: &[i32],
     az_u: bool,
     az_v: bool,
+    cctx: u8,
     have_left: bool,
     have_top: bool,
 ) {
@@ -7541,26 +7574,30 @@ fn recon_intra_chroma(
             }
             // residual (dequant chroma levels → inverse transform → add). Chroma qindex = yac
             // (uac/vac deltas are 0 for this clip).
-            if !az {
+            if !az || cctx != 0 {
                 use crate::av2_dequant::{cf_max, dequant_coeff, dq_lookup};
                 let dq = dq_lookup(LAST_QIDX.with(|c| c.get())); // delta-q: current SB's qindex (== frame yac when off)
                 let pels = w * h;
                 let tx_scale = (pels > 256) as u32 + (pels > 1024) as u32;
                 let cfmax = cf_max((bdmax_g() + 1).trailing_zeros());
                 let n = w * h;
-                // Intra chroma txtp is mode-derived and ALWAYS a 2D (DCT/ADST) combo — QM applies.
-                let iqm = crate::av2_qm::iqm_slice(1 + pl, w, h, true);
-                let mut coeff = crate::scratch::zeroed(n);
-                for i in 0..n.min(cf.len()) {
-                    let lvl = cf[i];
-                    if lvl != 0 {
-                        let s = (lvl < 0) as u32;
-                        let q = crate::av2_qm::qm_apply(iqm, i, h.min(32), dq);
-                        let mag0 = dequant_coeff(lvl.unsigned_abs(), q, 3, cfmax, s, false) as i32;
-                        let mag = (mag0 >> tx_scale).min(cfmax);
-                        coeff[i] = if lvl < 0 { -mag } else { mag };
+                let coeff = crate::av2_stx::chroma_coeffs(pl, cctx, bdmax, |p| {
+                    let cf = if p == 0 { cf_u } else { cf_v };
+                    // Intra chroma txtp is mode-derived and ALWAYS a 2D (DCT/ADST) combo — QM applies.
+                    let iqm = crate::av2_qm::iqm_slice(1 + p, w, h, true);
+                    let mut coeff = crate::scratch::zeroed(n);
+                    for i in 0..n.min(cf.len()) {
+                        let lvl = cf[i];
+                        if lvl != 0 {
+                            let s = (lvl < 0) as u32;
+                            let q = crate::av2_qm::qm_apply(iqm, i, h.min(32), dq);
+                            let mag0 = dequant_coeff(lvl.unsigned_abs(), q, 3, cfmax, s, false) as i32;
+                            let mag = (mag0 >> tx_scale).min(cfmax);
+                            coeff[i] = if lvl < 0 { -mag } else { mag };
+                        }
                     }
-                }
+                    coeff
+                });
                 let mut residual = crate::scratch::zeroed(n);
                 // Intra chroma txtp is MODE-DERIVED (dav2d recon_tmpl.c:480 + dav2d_txtp_from_uvmode).
                 // Parse-safe (all these are TX_CLASS_2D, so the coef context is unaffected) but the
@@ -7824,11 +7861,14 @@ pub fn decode_coefs_y(
         if stx_type > 0 {
             // Secondary-transform set. The set symbol selects which STX basis; the recon applies
             // the inverse secondary transform to the top-left coefficients BEFORE the primary itx.
+            // The coded symbol is a most-probable-first index, remapped per mode (dav2d
+            // recon_tmpl.c:688-724); ADST_ADST kernels sit after the 7 DCT_DCT sets.
+            let mode = (y_mode as usize).min(INV_STX_SET_MAP.len() - 1);
             stx_set = if t_dim_min >= 1 && txtp == ADST_ADST {
-                rav1d_msac_decode_symbol_adapt4(msac, &mut cdf.m.stx_set_adst, 3) as u8
+                INV_STX_SET_MAP_ADST[mode][rav1d_msac_decode_symbol_adapt4(msac, &mut cdf.m.stx_set_adst, 3) as usize]
             } else {
-                rav1d_msac_decode_symbol_adapt8(msac, &mut cdf.m.stx_set, 6) as u8
-            };
+                INV_STX_SET_MAP[mode][rav1d_msac_decode_symbol_adapt8(msac, &mut cdf.m.stx_set, 6) as usize]
+            } + if txtp == ADST_ADST { 7 } else { 0 };
         }
     }
     // Coefficient decode — 2D class (tx_class 0) reuses the DCT/dc-only paths; the H/V
@@ -7991,6 +8031,8 @@ pub struct InterInfo {
     /// -1 = off; 0=DC, 1=V, 2=H, 3=SMOOTH. Recon blends an intra predictor over the inter/warp
     /// prediction with the II mask (dav recon iiblend).
     pub ii_mode: i8,
+    /// Wedge index of an inter-intra block, -1 = smooth II mask.
+    pub ii_wedge: i32,
     /// SEG mask sign (comp_type 3).
     pub mask_sign: bool,
 }
@@ -8246,7 +8288,7 @@ pub fn decode_b_inter(
             mv_y: 0, mv_x: 0, warp_ref_idx: 0, drl_idx: drl, mv_prec: frame_mv_precision,
             amvd: false, warp_delta: [0, 0, 0, 0], warpmv_with_mvd: false, filter: 2,
             bawp: 0, bawp_chroma: 0, ref0: sm_ref0, ref1: sm_ref1,
-            drl_idx1: drl, mv_y1: 0, mv_x1: 0, cwp: 8, comp_type: 1, wedge_idx: -1, wedge_sign: false, mask_sign: false, is_tip: false, refine_mv: 0, ii_mode: -1,
+            drl_idx1: drl, mv_y1: 0, mv_x1: 0, cwp: 8, comp_type: 1, wedge_idx: -1, wedge_sign: false, mask_sign: false, is_tip: false, refine_mv: 0, ii_mode: -1, ii_wedge: -1,
         };
     }
 
@@ -8687,7 +8729,7 @@ pub fn decode_b_inter(
             mv_prec: mv_prec_out, amvd, warp_delta: [0, 0, 0, 0], warpmv_with_mvd: false,
             filter, bawp: 0, bawp_chroma: 0, ref0: refp0 as u8, ref1: refp1 as i8,
             drl_idx1: drl_idx[1], mv_y1: mvs[1].0, mv_x1: mvs[1].1, cwp: cwp_out,
-            comp_type, wedge_idx: _wedge_idx, wedge_sign: _wedge_sign, mask_sign: _mask_sign, is_tip: false, refine_mv: refine_mv_v, ii_mode: -1,
+            comp_type, wedge_idx: _wedge_idx, wedge_sign: _wedge_sign, mask_sign: _mask_sign, is_tip: false, refine_mv: refine_mv_v, ii_mode: -1, ii_wedge: -1,
         };
     }
     let ref0: u8 = if !is_tip && !seg_globalmv_skip && n_ref_frames > 1 {
@@ -8787,7 +8829,9 @@ pub fn decode_b_inter(
     let mut warp_ref_idx = 0usize;
     let mut warpmv_with_mvd = false;
     let mut bawp_out = 0u8;
-    let mut mm_ii_mode: i8 = -1;
+    // Inter-intra predictor + wedge (-1 = smooth II mask): from MM_INTERINTRA or warp_ii below.
+    let mut ii_mode: i8 = -1;
+    let mut ii_wedge = -1i32;
     let mut bawp1_out = 0u8;
     // warp_delta params (brick B warp splat): b->matrix[n] = signed decoded delta × step; [2]=-0x80
     // marks np==2 (only set for wri==0 WARPNEWMV). Default [0,0,0,0] = no delta (dav2d b->matrix),
@@ -8852,19 +8896,16 @@ pub fn decode_b_inter(
             }
         }
         bawp_out = bawp0;
-        let _ = &mm_ii_mode;
         if bx4 == 24 && by4 == 4 { crate::dlog!("B244 bawp0={bawp0} inter_mode={inter_mode} rng={} dif={:x} (oracle bawp0=1 rng=44288)", msac.rng, msac.dif); }
         if dv2 { crate::dlog!("DV2 bawp={bawp0} bawp1={bawp1_out} bawp_enabled={bawp_enabled} r={} (dav bawp[1,1] r=37064)", msac.rng); }
-        // interintra (MM_INTERINTRA=1): off for motion_modes=0x1d, but code the gate for generality.
+        // interintra (MM_INTERINTRA=1, dav2d decode.c:3079).
         if motion_modes & (1 << 1) != 0 && bawp0 == 0 && bw4 * bh4 > 2 && bw4.max(bh4) <= 16 && inter_mode >= NEARMV {
-            // size_group_lookup — interintra is OFF for this clip (dead code); plumb the real
-            // table when a stream enables MM_INTERINTRA.
-            let ctx = 0usize;
+            let ctx = size_group(bw4, bh4);
             if rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.interintra[ctx]) {
                 motion_mode = 1; // MM_INTERINTRA
-                mm_ii_mode = rav1d_msac_decode_symbol_adapt4(msac, &mut cdf.m.interintra_mode[ctx], 3) as i8;
+                ii_mode = rav1d_msac_decode_symbol_adapt4(msac, &mut cdf.m.interintra_mode[ctx], 3) as i8;
                 if bw4.min(bh4) > 1 && rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.interintra_wedge) {
-                    // read_wedge_idx — deferred (not reached for this clip)
+                    ii_wedge = read_wedge_idx(msac, &mut cdf.m);
                 }
             }
         }
@@ -9004,13 +9045,12 @@ pub fn decode_b_inter(
 
     // --- warp inter-intra (dav2d decode.c:3314): a WARPMV block decodes warp_interintra
     // regardless of the MM_INTERINTRA motion-mode flag. WARPNEWMV blocks skip it.
-    let mut ii_mode: i8 = -1;
     if inter_mode == WARPMV && bw4.min(bh4) >= 2 && bw4.max(bh4) <= 16 {
         let ctx = size_group(bw4, bh4);
         if rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.warp_interintra[ctx]) {
             ii_mode = rav1d_msac_decode_symbol_adapt4(msac, &mut cdf.m.interintra_mode[ctx], 3) as i8;
             if rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.interintra_wedge) {
-                crate::dlog!("[rav2d] warp_ii WEDGE=1 — wedge_idx parse NOT implemented (desync ahead)");
+                ii_wedge = read_wedge_idx(msac, &mut cdf.m);
             }
         }
     }
@@ -9072,7 +9112,7 @@ pub fn decode_b_inter(
 
     if bx4 == 24 && by4 == 0 { crate::dlog!("W240 END-mode inter_mode={inter_mode} mm={motion_mode} filter={filter} rng={} dif={:x}", msac.rng, msac.dif); }
     if bx4 == 24 && by4 == 4 { crate::dlog!("B244 END-mode inter_mode={inter_mode} mm={motion_mode} filter={filter} rng={} dif={:x} (oracle SUBPEL filter=1 rng=33136)", msac.rng, msac.dif); }
-    InterInfo { skip, inter_mode, motion_mode, mvprec_def, mv_y, mv_x, warp_ref_idx, drl_idx, mv_prec, amvd, warp_delta, warpmv_with_mvd, filter, bawp: bawp_out, bawp_chroma: bawp1_out, ref0, ref1: -1, drl_idx1: drl_idx, mv_y1: 0, mv_x1: 0, cwp: 8, comp_type: 0, wedge_idx: -1, wedge_sign: false, mask_sign: false, is_tip, refine_mv: 0, ii_mode: if ii_mode >= 0 { ii_mode } else { mm_ii_mode } }
+    InterInfo { skip, inter_mode, motion_mode, mvprec_def, mv_y, mv_x, warp_ref_idx, drl_idx, mv_prec, amvd, warp_delta, warpmv_with_mvd, filter, bawp: bawp_out, bawp_chroma: bawp1_out, ref0, ref1: -1, drl_idx1: drl_idx, mv_y1: 0, mv_x1: 0, cwp: 8, comp_type: 0, wedge_idx: -1, wedge_sign: false, mask_sign: false, is_tip, refine_mv: 0, ii_mode, ii_wedge }
 }
 
 /// TX scan index into `SCANS` from the TX log2 dims `(slw, slh)` — the dav2d

@@ -719,7 +719,7 @@ pub fn decode_coefs_uv(
     // Chroma transform class (0 = 2D, 2 = H, 3 = V). Intra chroma is always 2D; inter chroma
     // INHERITS the luma txtp's class (may be H/V), which selects a different scan + coef path.
     tx_class: usize,
-) -> (i32, u8) {
+) -> (i32, u8, u8) {
     // 64-dim TXs code only a 32-core: the coefficient grid, level contexts, and scan all
     // work in CORE dims (same clw/clh convention as the luma path). Clamping here also
     // leaves the `< 3` cctx size gate unchanged.
@@ -737,7 +737,7 @@ pub fn decode_coefs_uv(
     };
     if COEF_DBG.with(|c| c.get()) { crate::dlog!("UVDBG pl={plane} all_zero={} sctx={sctx} tctx={t_dim_ctx} uset={u_skip_set} rng={} dif={:x}", all_zero as u8, msac.rng, msac.dif); }
     if all_zero {
-        return (-1, 0x40);
+        return (-1, 0x40, 0);
     }
     let eob = decode_eob(msac, cdf, tx2dszctx, 2);
     if COEF_DBG.with(|c| c.get()) { crate::dlog!("UVDBG pl={plane} eob={eob} tx2dszctx={tx2dszctx} rng={} dif={:x}", msac.rng, msac.dif); }
@@ -752,8 +752,9 @@ pub fn decode_coefs_uv(
         (ss.0 == 1 && ss.1 == 1) || slw < 3 || slh < 3
     };
     // seq enable_cctx gates the whole symbol (tool-off mint: crash without).
+    let mut cctx = 0;
     if plane == 1 && eob >= intra as i32 && cctx_allowed && crate::av2_recon::SEQ_TOOLS.with(|c| c.get().cctx) {
-        let cctx = rav1d_msac_decode_symbol_adapt8(msac, cctx_cdf, 6);
+        cctx = rav1d_msac_decode_symbol_adapt8(msac, cctx_cdf, 6);
         if COEF_DBG.with(|c| c.get()) { crate::dlog!("UVDBG pl={plane} cctx={cctx} rng={} dif={:x}", msac.rng, msac.dif); }
     }
     // 2D (intra, or inter with a 2D luma txtp) uses the square scan; an inherited H/V luma
@@ -763,7 +764,7 @@ pub fn decode_coefs_uv(
     } else {
         decode_coefs_dct_uv(msac, cdf, cf, plane, eob, tx2dszctx, slw, slh, scan)
     };
-    (eob, cf_ctx)
+    (eob, cf_ctx, cctx)
 }
 
 /// Decode a chroma 2D (DCT_DCT) coefficient block (dav2d `DECODE_COEFS_CLASS`, chroma).
