@@ -31,7 +31,7 @@ impl Plane {
     #[track_caller]
     pub fn at(&self, x: usize, y: usize) -> i32 {
         let i = y * self.stride + x;
-        if std::env::var("ATDBG").is_ok() && i >= self.px.len() {
+        if i >= self.px.len() && std::env::var("ATDBG").is_ok() {
             crate::dlog!("[ATDBG] Plane::at OOB x={x} y={y} w={} h={} len={} caller={}", self.w, self.h, self.px.len(), std::panic::Location::caller());
         }
         // HARDENING (root fix): every Plane::at caller in the recon/filter paths derives (x,y)
