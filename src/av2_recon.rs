@@ -446,15 +446,16 @@ pub fn read_delta_q(
         // DC + chroma paths read F2_DCQ/F2_ACQ, so recompute them here.
         let d = crate::av2_frame::F2_QDELTAS.with(|c| c.get());
         let clipq = |dd: i32| (new_qidx as i32 + dd).clamp(0, qmax) as u32;
+        let [base_ydc, base_uvdc, base_uvac] = crate::av2_frame::SEQ_BASE_DQ.with(|c| c.get());
         crate::av2_frame::F2_DCQ.with(|c| c.set([
-            crate::av2_dequant::dq_lookup(clipq(d[0])),
-            crate::av2_dequant::dq_lookup(clipq(d[1])),
-            crate::av2_dequant::dq_lookup(clipq(d[2])),
+            crate::av2_dequant::dq_lookup(clipq(d[0] + base_ydc)),
+            crate::av2_dequant::dq_lookup(clipq(d[1] + base_uvdc)),
+            crate::av2_dequant::dq_lookup(clipq(d[2] + base_uvdc)),
         ]));
         crate::av2_frame::F2_ACQ.with(|c| c.set([
             crate::av2_dequant::dq_lookup(clipq(0)),
-            crate::av2_dequant::dq_lookup(clipq(d[3])),
-            crate::av2_dequant::dq_lookup(clipq(d[4])),
+            crate::av2_dequant::dq_lookup(clipq(d[3] + base_uvac)),
+            crate::av2_dequant::dq_lookup(clipq(d[4] + base_uvac)),
         ]));
         if std::env::var("MDQ").is_ok() {
             crate::dlog!("[MDQ] mi=({bx4},{by4}) dq={delta_q} qidx={new_qidx} rng={}", msac.rng);
@@ -3806,8 +3807,11 @@ fn bawp_morph(pred: &mut [i32], bx4: usize, by4: usize, bw4: usize, bh4: usize, 
     let ref_x = bx4 as i32 * 4 + mvx;
     let ref_y = by4 as i32 * 4 + mvy;
     // can_morph: the ref template must lie inside the frame (inter ref ⇒ tile edges = frame edges).
-    // Frame dims from the current frame's stored size (NOT hardcoded — v320 is 320×176).
-    let (cfw, cfh) = CUR_FRAME_REF.with(|c| { let v = c.get(); (v.3 as i32, v.4 as i32) });
+    // avm `pd->dst.width` is the 8px-aligned coded size, not the crop (reconinter.c:1960).
+    let (cfw, cfh) = CUR_FRAME_REF.with(|c| {
+        let v = c.get();
+        ((crate::av2_frame::mi_dim(v.3 as usize) * 4) as i32, (crate::av2_frame::mi_dim(v.4 as usize) * 4) as i32)
+    });
     let (fw, fh, fbw4, fbh4) = (cfw, cfh, cfw / 4, cfh / 4);
     let sb_w4 = (bw4 as i32).min(fbw4 - bx4 as i32);
     let sb_h4 = (bh4 as i32).min(fbh4 - by4 as i32);
@@ -3893,9 +3897,10 @@ fn bawp_morph_chroma(pred: &mut [i32], plane: usize, cpx: usize, cpy: usize, cw:
     // avm reconinter.c derive_bawp_parameters / av2_build_one_bawp_inter_predictor, ss-general
     // (dav2d only decodes 420, so the 422/444 arms mirror avm directly).
     let (ssh, ssv) = { let s = crate::av2_frame::SS.with(|c| c.get()); (s.0 as i32, s.1 as i32) };
+    // avm `pd->dst.width` is the 8px-aligned coded size, not the crop (reconinter.c:1960).
     let (fw, fh) = CUR_FRAME_REF.with(|c| {
         let v = c.get();
-        (((v.3 as i32) + ((1 << ssh) - 1)) >> ssh, ((v.4 as i32) + ((1 << ssv) - 1)) >> ssv)
+        (((crate::av2_frame::mi_dim(v.3 as usize) * 4) as i32) >> ssh, ((crate::av2_frame::mi_dim(v.4 as usize) * 4) as i32) >> ssv)
     });
     // BAWP template availability is TILE-relative (dav recon_tmpl.c:2839), in chroma pixels.
     let tbawp = TILE_B.with(|t| t.get());

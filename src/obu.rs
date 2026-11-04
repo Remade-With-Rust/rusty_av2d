@@ -904,15 +904,16 @@ fn parse_av2_frame_hdr_front(
         let qmax = 255 + 48 * seq_hdr.hbd as i32;
         crate::av2_frame::F2_QMAX.with(|c| c.set(qmax));
         let clipq = |d: i32| (yac as i32 + d).clamp(0, qmax) as u32;
+        let [base_ydc, base_uvdc, base_uvac] = crate::av2_frame::SEQ_BASE_DQ.with(|c| c.get());
         crate::av2_frame::F2_DCQ.with(|c| c.set([
-            crate::av2_dequant::dq_lookup(clipq(ydc_delta)),
-            crate::av2_dequant::dq_lookup(clipq(udc_delta)),
-            crate::av2_dequant::dq_lookup(clipq(vdc_delta)),
+            crate::av2_dequant::dq_lookup(clipq(ydc_delta + base_ydc)),
+            crate::av2_dequant::dq_lookup(clipq(udc_delta + base_uvdc)),
+            crate::av2_dequant::dq_lookup(clipq(vdc_delta + base_uvdc)),
         ]));
         crate::av2_frame::F2_ACQ.with(|c| c.set([
             crate::av2_dequant::dq_lookup(clipq(0)),
-            crate::av2_dequant::dq_lookup(clipq(uac_delta)),
-            crate::av2_dequant::dq_lookup(clipq(vac_delta)),
+            crate::av2_dequant::dq_lookup(clipq(uac_delta + base_uvac)),
+            crate::av2_dequant::dq_lookup(clipq(vac_delta + base_uvac)),
         ]));
         crate::av2_frame::F2_QDELTAS.with(|c| c.set([ydc_delta, udc_delta, vdc_delta, uac_delta, vac_delta]));
         if std::env::var("QDBG").is_ok() {
@@ -1022,7 +1023,9 @@ fn parse_av2_frame_hdr_front(
             crate::av2_frame::DEBLOCK_CFG.with(|c| {
                 c.set(crate::av2_frame::DeblockCfg {
                     level_y0, level_y1, level_u, level_v, dq_y0, dq_y1, dq_u, dq_v,
-                    uac_delta, vac_delta, sub_pu: lf_sub_pu,
+                    uac_delta: uac_delta + base_uvac,
+                    vac_delta: vac_delta + base_uvac,
+                    sub_pu: lf_sub_pu,
                 });
             });
         }
@@ -1866,18 +1869,25 @@ fn parse_seq_hdr(
         let mut ydc_dq_enabled = false;
         let mut uvdc_dq_enabled = false;
         let mut uvac_dq_enabled = false;
+        // AVM read_sequence_quant_params: DELTA_DCQUANT_MIN + literal(DELTA_DCQUANT_BITS).
+        let base_dq = |gb: &mut GetBits| gb.get_bits(5) as i32 - 23;
+        let (mut base_ydc, mut base_uvdc, mut base_uvac) = (0, 0, 0);
         if !equal_ac_dc_q {
-            gb.get_bits(5); // base_ydc_dq
+            base_ydc = base_dq(gb);
             ydc_dq_enabled = gb.get_bit();
         }
         if !is_i400 {
             if !equal_ac_dc_q {
-                gb.get_bits(5); // base_uvdc_dq
+                base_uvdc = base_dq(gb);
                 uvdc_dq_enabled = gb.get_bit();
             }
-            gb.get_bits(5); // base_uvac_dq
+            base_uvac = base_dq(gb);
             uvac_dq_enabled = gb.get_bit();
+            if equal_ac_dc_q {
+                base_uvdc = base_uvac;
+            }
         }
+        crate::av2_frame::SEQ_BASE_DQ.with(|c| c.set([base_ydc, base_uvdc, base_uvac]));
         // in-loop filters (628)
         // disable_loopfilters_across_tiles
         crate::av2_recon::SEQ_NO_LF_ACROSS_TILES.with(|c| c.set(gb.get_bit()));

@@ -621,6 +621,8 @@ thread_local! {
     pub static F2_QDELTAS: std::cell::Cell<[i32; 5]> = const { std::cell::Cell::new([0; 5]) };
     /// Largest qindex for this stream's bit depth: AVM `MAXQ_8_BITS` / `MAXQ_10_BITS` / `MAXQ`.
     pub static F2_QMAX: std::cell::Cell<i32> = const { std::cell::Cell::new(255) };
+    /// Sequence-level q offsets `[base_ydc, base_uvdc, base_uvac]`, on top of [`F2_QDELTAS`].
+    pub static SEQ_BASE_DQ: std::cell::Cell<[i32; 3]> = const { std::cell::Cell::new([0; 3]) };
     /// Decode-order frame counter (incremented at each frame's LAST_QIDX reset) - probe gating.
     pub static DECODE_FRAME_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
     /// Seq-header `inter_ddt`: when set, inter blocks remap (flip)adst→(f)ddt in the itx
@@ -1623,6 +1625,7 @@ pub fn deblock_tip_frame() {
     let unit = if opfl { 8 } else { 16 };
     let yac = F2_YAC.with(|c| c.get()) as i32;
     let [_, _, _, uac, vac] = F2_QDELTAS.with(|c| c.get());
+    let base_uvac = SEQ_BASE_DQ.with(|c| c.get())[2];
     let ti = crate::av2_recon::TILE_INFO.with(|c| c.get());
     let skip_tile_edges = crate::av2_recon::SEQ_NO_LF_ACROSS_TILES.with(|c| c.get());
     let (ssh, ssv) = crate::av2_recon::ss_g();
@@ -1630,7 +1633,7 @@ pub fn deblock_tip_frame() {
         let mut f = fr.borrow_mut();
         let bdmax = f.bitdepth_max;
         let hbd = ((bdmax + 1).trailing_zeros() as i32 - 8) / 2;
-        for (pl, delta) in [0, uac, vac].into_iter().enumerate() {
+        for (pl, delta) in [0, uac + base_uvac, vac + base_uvac].into_iter().enumerate() {
             let (sx, sy) = if pl == 0 { (0, 0) } else { (ssh, ssv) };
             let p = &mut f.pl[pl];
             if p.w == 0 {
