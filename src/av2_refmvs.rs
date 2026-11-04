@@ -2627,9 +2627,10 @@ impl Default for RefmvWarpBank {
 
 impl RefmvWarpBank {
     /// dav2d `dav2d_refmvs_warp_add` (refmvs.c:1146): LRU push of a warp matrix for `ref`.
-    pub fn add(&mut self, ref0: i8, m: [i32; 6]) {
+    /// False once the per-SB budget is spent, which also skips a compound block's second model.
+    pub fn add(&mut self, ref0: i8, m: [i32; 6]) -> bool {
         if self.hits >= 64 || !(0..7).contains(&(ref0 as i32)) {
-            return;
+            return false;
         }
         self.hits += 1;
         let r = ref0 as usize;
@@ -2658,7 +2659,7 @@ impl RefmvWarpBank {
                 }
                 self.mat[r][to] = bak;
             }
-            return;
+            return true;
         }
         let tgt = if sz == 4 {
             let t = self.idx[r] as usize & 3;
@@ -2670,6 +2671,7 @@ impl RefmvWarpBank {
             t
         };
         self.mat[r][tgt] = m;
+        true
     }
 }
 
@@ -2731,13 +2733,13 @@ impl RefmvsGrid {
     /// (`mf & 2`) stores the PER-CELL projected MV (`warp_cell_mv`); others store a uniform MV.
     #[allow(clippy::too_many_arguments)]
     pub fn splat(&mut self, bx4: usize, by4: usize, bw4: usize, bh4: usize, mv0: Mv, ref0: i8, bs: u8, mf: u8, matrix: [i32; 6]) {
-        self.splat_pair(bx4, by4, bw4, bh4, [mv0, Mv { y: -0x8000, x: -0x8000 }], (ref0, -1), bs, mf, matrix);
+        self.splat_pair(bx4, by4, bw4, bh4, [mv0, Mv { y: -0x8000, x: -0x8000 }], (ref0, -1), bs, mf, matrix, None);
     }
 
     /// Compound-aware splat: stores the FULL ref pair + MV pair per cell (the pair feeds later
     /// blocks' compound spatial scan + bank seeding).
     #[allow(clippy::too_many_arguments)]
-    pub fn splat_pair(&mut self, bx4: usize, by4: usize, bw4: usize, bh4: usize, mvp: [Mv; 2], refp: (i8, i8), bs: u8, mf: u8, matrix: [i32; 6]) {
+    pub fn splat_pair(&mut self, bx4: usize, by4: usize, bw4: usize, bh4: usize, mvp: [Mv; 2], refp: (i8, i8), bs: u8, mf: u8, matrix: [i32; 6], matrix2: Option<[i32; 6]>) {
         for r in 0..bh4 {
             if !crate::av2_recon::work_tick("refmvs:2632") { break; }
             for c in 0..bw4 {
@@ -2748,8 +2750,13 @@ impl RefmvsGrid {
                     mvp[0]
                 };
                 let cell = &mut self.r[(by4 + r).min(crate::av2_recon::nb_len() - 1) * crate::av2_recon::nb_len() + (bx4 + c).min(crate::av2_recon::nb_len() - 1)];
+                // Compound warp: the second arm projects through its own model (dav2d splat_comp_warpmv_c).
+                let mv1 = match matrix2 {
+                    Some(m2) if mf & 2 != 0 => warp_cell_mv(&m2, bx4 as i32, by4 as i32, (c as i32) & !1, (r as i32) & !1),
+                    _ => mvp[1],
+                };
                 *cell = RefmvsBlock {
-                    mv: [mv, mvp[1]],
+                    mv: [mv, mv1],
                     ref_: [refp.0, refp.1],
                     bs,
                     mf,

@@ -1100,7 +1100,7 @@ pub fn tip_recon_sb(bx4: usize, by4: usize, iw4: usize, ih4: usize) {
     let opfl = seq_tip_refine && (cfg.tip_frame_mode == 1 || cfg.tip_subpel_filter == 2);
     let step = 2usize << (!opfl as usize);
     let tip_arg = Some((step, step, true, iw4, ih4));
-    recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, None, filter, false, None, None, None, tip_arg, -1, -1);
+    recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, None, filter, false, None, None, None, tip_arg, -1, -1, [None; 2]);
 }
 
 /// dav2d `derive_pri_sec_ref` (obu.c:929): when primary_ref_frame is NOT signaled, it is derived
@@ -3211,6 +3211,8 @@ fn recon_inter_chroma(
     // Inter-intra blend mode (-1 = off): dav chroma iiblend (recon 3731), after MC, else-of-bawp.
     ii_mode: i8,
     ii_wedge: i32,
+    // Compound warp-causal models, per arm (None = translational MC for that arm).
+    comp_warp: [Option<[i32; 6]>; 2],
 ) {
     // `bx4`/`by4` = LUMA block pos (for the warp matrix eval); `cpx`/`cpy`/`cw`/`ch` = the chroma
     // block's pixel origin + dims (for a sub-8×8 shared chroma these come from the 8×8 carrier).
@@ -3381,7 +3383,11 @@ fn recon_inter_chroma(
                         let pics = rp.borrow();
                         for i in 0..2 {
                             if let Some(p) = pics[refidx[refs[i]] as usize].as_ref() {
-                                mc_translate_prep(&p[pl + 1], &mut t[i], cw, cpx, cpy, cw, ch, mvp[i].y, mvp[i].x, filter as usize, ss_g().0 as u32, ss_g().1 as u32);
+                                if let Some(m) = comp_warp[i] {
+                                    crate::av2_warp::warp_prep(&p[pl + 1], &mut t[i], cw, &m, bx4, by4, cw, ch, ss_g().0 as u32, ss_g().1 as u32);
+                                } else {
+                                    mc_translate_prep(&p[pl + 1], &mut t[i], cw, cpx, cpy, cw, ch, mvp[i].y, mvp[i].x, filter as usize, ss_g().0 as u32, ss_g().1 as u32);
+                                }
                             }
                         }
                         if icdbg && pl == 0 {
@@ -4230,6 +4236,7 @@ pub fn decode_leaf(
         let mut luma_pred: Vec<i32> = Vec::new();
         let mut fmv = crate::av2_refmvs::Mv { y: 0, x: 0 };
         let mut warp_pred: Option<[i32; 6]> = None;
+        let mut comp_warp: [Option<[i32; 6]>; 2] = [None; 2];
         // Compound recon state threaded from the luma blend to the chroma blend:
         // the 2x2 SEG mask, whether SEG produced it, and the (mv pair, list-index refs).
         let mut comp_seg_mask: Vec<u8> = Vec::new();
@@ -4520,13 +4527,28 @@ pub fn decode_leaf(
             } else {
                 warp_pred
             };
-            let (mf, matrix) = match warp_m {
-                Some(m) => {
-                    WARPBANK.with(|wb| wb.borrow_mut().add(info.ref0 as i8, m));
-                    (2u8, m)
+            // Compound warp-causal (NEWMV_NEWMV): each arm fits its own model (dav2d decode.c:1287).
+            let is_comp_warp = comp && info.motion_mode == 2;
+            if is_comp_warp {
+                let warp1 = GRID.with(|g| derive_warpmv(&g.borrow(), bx4, by4, bw4, bh4, w4c, h4c, info.ref1, fmv1, sb_step4(), col_end));
+                comp_warp = [warp_pred, warp1];
+            }
+            // Only VALID models enter the bank (dav2d decode.c:1314); a failed derive splats
+            // identity to the grid but pushes nothing.
+            let mut banked = true;
+            if let Some(m) = warp_pred {
+                banked = WARPBANK.with(|wb| wb.borrow_mut().add(info.ref0 as i8, m));
+            }
+            if banked {
+                if let Some(m) = comp_warp[1] {
+                    WARPBANK.with(|wb| wb.borrow_mut().add(info.ref1, m));
                 }
+            }
+            let (mf, matrix) = match warp_m {
+                Some(m) => (2u8, m),
                 None => (0u8, [0i32; 6]),
             };
+            let matrix2 = is_comp_warp.then(|| comp_warp[1].unwrap_or(IDENTITY_WARP));
             // ===== Stage D warp-MC harness: warp_affine luma prediction vs dav's frame-2 plane.
             // Gated to first-SB warp blocks (matrix from refmvs is bit-exact there). =====
             if is_warp && info.bawp == 0 {
@@ -4600,7 +4622,7 @@ pub fn decode_leaf(
             // splat_oneref_mv leaves mf = gmv|warp bits only).
             let mf_pair = mf | if comp { (cwp as u8) << 2 } else { 0 };
             let mv1_cell = if comp { fmv1 } else { Mv { y: -0x8000, x: -0x8000 } };
-            GRID.with(|g| g.borrow_mut().splat_pair(bx4, by4, bw4, bh4, [fmv, mv1_cell], (eref0, info.ref1), bs as u8, mf_pair, matrix));
+            GRID.with(|g| g.borrow_mut().splat_pair(bx4, by4, bw4, bh4, [fmv, mv1_cell], (eref0, info.ref1), bs as u8, mf_pair, matrix, matrix2));
             BANK.with(|bk| bk.borrow_mut().add_block_pair(bw4, bh4, by4, bx4, sb_step4(), sb_step4() >> 5, eref0, info.ref1, [fmv, fmv1], cwp));
             // Temporal motion-field write (dav splat_oneref/tworef_mv t arm, decode.c:574/655):
             // quantized MV pair + ref pair. Single: ref=(r0,r0), both arms = q(mv0), INVALID →
@@ -4650,6 +4672,29 @@ pub fn decode_leaf(
                         j += 2;
                     }
                     // per-cell write done; skip the block-level write below.
+                    tb.ref_ = (-2, -2); // sentinel: handled
+                } else if let Some(m2) = matrix2 {
+                    // Compound warp (dav2d splat_comp_warpmv_c): per-8x8 quantized MVs from both
+                    // models, ordered by t_swap, a dead arm falling back to the live one.
+                    let t_swap = ref_flip_pair(info.ref0 as i8, info.ref1) as usize;
+                    let mut r = [0i8; 2];
+                    r[t_swap] = info.ref0 as i8;
+                    r[1 - t_swap] = info.ref1;
+                    for j in (0..bh4).step_by(2) {
+                        for k in (0..bw4).step_by(2) {
+                            let cell_mv = |m: &[i32; 6]| crate::av2_refmvs::warp_cell_mv(m, bx4 as i32, by4 as i32, k as i32, j as i32);
+                            let mut q = [0u16; 2];
+                            q[t_swap] = quantize_mv(cell_mv(&matrix));
+                            q[1 - t_swap] = quantize_mv(cell_mv(&m2));
+                            let cell = match (q[0] == INVALID_TRAJ, q[1] == INVALID_TRAJ) {
+                                (true, true) => TemporalBlock::default(),
+                                (true, false) => TemporalBlock { ref_: (r[1], r[1]), qmv: [q[1], q[1]] },
+                                (false, true) => TemporalBlock { ref_: (r[0], r[0]), qmv: [q[0], q[0]] },
+                                (false, false) => TemporalBlock { ref_: (r[0], r[1]), qmv: q },
+                            };
+                            rp_write(bx4 + k, by4 + j, 2, 2, cell);
+                        }
+                    }
                     tb.ref_ = (-2, -2); // sentinel: handled
                 } else if info.is_tip {
                     // TIP block: NO generic temporal write (dav decode.c:571 t dst = NULL);
@@ -4770,7 +4815,11 @@ pub fn decode_leaf(
                             let pics = rp.borrow();
                             for i in 0..2 {
                                 if let Some(p) = pics[refidx[refs[i]] as usize].as_ref() {
-                                    mc_translate_prep(&p[0], &mut t[i], w, bx4 * 4, by4 * 4, w, h, mvp[i].y, mvp[i].x, info.filter as usize, 0, 0);
+                                    if let Some(m) = comp_warp[i] {
+                                        crate::av2_warp::warp_prep(&p[0], &mut t[i], w, &m, bx4, by4, w, h, 0, 0);
+                                    } else {
+                                        mc_translate_prep(&p[0], &mut t[i], w, bx4 * 4, by4 * 4, w, h, mvp[i].y, mvp[i].x, info.filter as usize, 0, 0);
+                                    }
                                 }
                             }
                         });
@@ -5196,7 +5245,7 @@ pub fn decode_leaf(
             // Inter-intra chroma blend: single-ref non-TIP only (mirrors the luma gate), and never
             // on sub-8x8 shared chroma, which is per-sub-block MC alone (dav2d recon_tmpl.c:3724).
             let cii = if info.ref1 < 0 && !info.is_tip && info.bawp == 0 && cbs == bs as i32 { info.ii_mode } else { -1 };
-            recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, warp_pred, info.filter, cbs != bs as i32, chroma_coefs.as_ref(), bawp_alpha, comp_arg, tip_arg, cii, info.ii_wedge);
+            recon_inter_chroma(bx4, by4, cpx, cpy, cw, ch, fmv, warp_pred, info.filter, cbs != bs as i32, chroma_coefs.as_ref(), bawp_alpha, comp_arg, tip_arg, cii, info.ii_wedge, comp_warp);
             // Sub-PU deblock CHROMA layer — AFTER the chroma recon (recon_inter_chroma's
             // mark_db_chroma writes the chroma edge grids; the caps must land on top of them).
             let dcfg2 = crate::av2_frame::DEBLOCK_CFG.with(|c| c.get());
