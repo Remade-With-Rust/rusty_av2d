@@ -37,9 +37,11 @@ dimensions that are not multiples of 8, including odd ones, in 8-bit 4:2:0.
 2. **AV2 is not a finalized standard.** There are no official conformance
    vectors. "Correct" here means bit-exact against AVM/dav2d as of this commit;
    the bitstream may still change.
-3. **Performance is unoptimized.** Correctness was the only goal. The decoder
-   is fully scalar: no SIMD and no assembly (the inherited `rav1d` assembly was
-   dead code for AV2 and has been removed). Profiled, the classic vectorizable
+3. **Performance is young.** Correctness came first. There is no assembly (the
+   inherited `rav1d` assembly was dead code for AV2 and has been removed). Motion
+   compensation's 8-tap filters and compound blends run runtime-dispatched
+   AVX2/NEON kernels (`src/simd.rs`, `RUSTY_AV2D_NOSIMD=1` opts out); everything
+   else is scalar. Profiled, the classic vectorizable
    kernels are only ~26% of runtime; most of the cost is the recon data path,
    where samples are stored one-per-`i32` and bounds-checked per access. The
    `work_tick` hardening guards were suspected to matter and measured not to

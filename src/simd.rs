@@ -10,9 +10,11 @@
 //!   the scalar twin. No nightly features; `core::arch` intrinsics only.
 //!
 //! Shapes covered (the Phase 2 map, cheapest-first):
-//! - 8-tap FIR over a contiguous row (`fir8_row`): the H pass of motion
-//!   compensation, and the V pass too — the mid buffer is row-major, so summing
-//!   `mid[(y+k)*w + x]` across `k` is 8 contiguous-row loads. Lanewise it is
+//! - 8-tap FIR over a row of samples (`fir8_row_u16`): the H pass of motion
+//!   compensation.
+//! - 8-tap FIR down columns (`fir8_col` over the row-major mid buffer,
+//!   `fir8_col_u16` over a reference plane): the V pass. Summing
+//!   `mid[(y+k)*w + x]` across `k` is 8 contiguous-row loads, so lanewise it is
 //!   one multiply-add per output instead of eight.
 //! - Elementwise compound blends (`avg_row`, `w_avg_row`, `mask_row`): two
 //!   prep-precision buffers in, one clamped row out.
@@ -54,97 +56,18 @@ pub fn simd_level() -> u32 {
     })
 }
 
+/// Whether a source of `len` holds `7 * stride + n` samples, the reach of a vertical 8-tap kernel.
+/// Checked arithmetic: a wrapped sum would let the kernels read out of bounds.
+#[inline]
+fn col_fits(len: usize, stride: usize, n: usize) -> bool {
+    stride.checked_mul(7).and_then(|reach| reach.checked_add(n)).is_some_and(|need| need <= len)
+}
+
 // ---------------------------------------------------------------------------
-// 8-tap FIR over a row: out[x] = clamp/((sum_k taps[k]*src[x+k]) + rnd) >> sh
+// 8-tap FIR over a row of samples: out[x] = clamp/((sum_k taps[k]*src[x+k]) + rnd) >> sh
 // `src` must have `out.len() + 7` readable elements. `clamp_max < 0` = no clamp
 // (prep precision).
 // ---------------------------------------------------------------------------
-
-pub fn fir8_row_scalar(src: &[i32], taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
-    for (x, o) in out.iter_mut().enumerate() {
-        let s0 = &src[x..x + 8];
-        let s: i32 = (0..8).map(|k| taps[k] as i32 * s0[k]).sum();
-        let v = (s + rnd) >> sh;
-        *o = if clamp_max >= 0 { v.clamp(0, clamp_max) } else { v };
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-unsafe fn fir8_row_avx2(src: &[i32], taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
-    use core::arch::x86_64::*;
-    let n = out.len();
-    let mut x = 0usize;
-    let vr = _mm256_set1_epi32(rnd);
-    let sh_v = _mm_cvtsi32_si128(sh);
-    let zero = _mm256_setzero_si256();
-    let vmax = _mm256_set1_epi32(clamp_max);
-    // Broadcast each tap once.
-    let t: [__m256i; 8] = core::array::from_fn(|k| _mm256_set1_epi32(taps[k] as i32));
-    while x + 8 <= n {
-        let mut acc = vr;
-        for (k, tk) in t.iter().enumerate() {
-            let s = _mm256_loadu_si256(src.as_ptr().add(x + k) as *const __m256i);
-            acc = _mm256_add_epi32(acc, _mm256_mullo_epi32(s, *tk));
-        }
-        let mut v = _mm256_sra_epi32(acc, sh_v);
-        if clamp_max >= 0 {
-            v = _mm256_min_epi32(_mm256_max_epi32(v, zero), vmax);
-        }
-        _mm256_storeu_si256(out.as_mut_ptr().add(x) as *mut __m256i, v);
-        x += 8;
-    }
-    if x < n {
-        fir8_row_scalar(&src[x..], taps, &mut out[x..], rnd, sh, clamp_max);
-    }
-}
-
-#[cfg(target_arch = "aarch64")]
-unsafe fn fir8_row_neon(src: &[i32], taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
-    use core::arch::aarch64::*;
-    let n = out.len();
-    let mut x = 0usize;
-    let vr = vdupq_n_s32(rnd);
-    let vsh = vdupq_n_s32(-sh); // vshlq with negative = arithmetic right shift
-    let zero = vdupq_n_s32(0);
-    let vmax = vdupq_n_s32(clamp_max);
-    let t: [int32x4_t; 8] = core::array::from_fn(|k| vdupq_n_s32(taps[k] as i32));
-    while x + 4 <= n {
-        let mut acc = vr;
-        for (k, tk) in t.iter().enumerate() {
-            let s = vld1q_s32(src.as_ptr().add(x + k));
-            acc = vmlaq_s32(acc, s, *tk);
-        }
-        let mut v = vshlq_s32(acc, vsh);
-        if clamp_max >= 0 {
-            v = vminq_s32(vmaxq_s32(v, zero), vmax);
-        }
-        vst1q_s32(out.as_mut_ptr().add(x), v);
-        x += 4;
-    }
-    if x < n {
-        fir8_row_scalar(&src[x..], taps, &mut out[x..], rnd, sh, clamp_max);
-    }
-}
-
-/// Dispatching 8-tap row FIR. `src.len() >= out.len() + 7`.
-#[inline]
-pub fn fir8_row(src: &[i32], taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
-    debug_assert!(src.len() >= out.len() + 7);
-    #[cfg(target_arch = "x86_64")]
-    if simd_level() >= 1 {
-        // SAFETY: avx2 verified by simd_level(); slice bounds checked above.
-        unsafe { fir8_row_avx2(src, taps, out, rnd, sh, clamp_max) };
-        return;
-    }
-    #[cfg(target_arch = "aarch64")]
-    if simd_level() >= 1 {
-        // SAFETY: NEON is baseline on aarch64; slice bounds checked above.
-        unsafe { fir8_row_neon(src, taps, out, rnd, sh, clamp_max) };
-        return;
-    }
-    fir8_row_scalar(src, taps, out, rnd, sh, clamp_max);
-}
 
 /// Vertical 8-tap over a row-major buffer: out[x] = (sum_k taps[k]*src[k*stride+x] + rnd) >> sh.
 /// `src` must have `7*stride + out.len()` readable elements from its start.
@@ -216,7 +139,7 @@ unsafe fn fir8_col_neon(src: &[i32], stride: usize, taps: &[i8; 8], out: &mut [i
 /// Dispatching vertical 8-tap. `src.len() >= 7*stride + out.len()`.
 #[inline]
 pub fn fir8_col(src: &[i32], stride: usize, taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
-    debug_assert!(src.len() >= 7 * stride + out.len());
+    assert!(col_fits(src.len(), stride, out.len()), "fir8 col source too short");
     #[cfg(target_arch = "x86_64")]
     if simd_level() >= 1 {
         // SAFETY: avx2 verified; bounds asserted.
@@ -309,7 +232,7 @@ unsafe fn fir8_row_u16_neon(src: &[u16], taps: &[i8; 8], out: &mut [i32], rnd: i
 /// Dispatching u16-source 8-tap row FIR. `src.len() >= out.len() + 7`.
 #[inline]
 pub fn fir8_row_u16(src: &[u16], taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
-    debug_assert!(src.len() >= out.len() + 7);
+    assert!(src.len() >= out.len() + 7, "fir8 row source too short");
     #[cfg(target_arch = "x86_64")]
     if simd_level() >= 1 {
         // SAFETY: avx2 verified; bounds asserted.
@@ -395,7 +318,7 @@ unsafe fn fir8_col_u16_neon(src: &[u16], stride: usize, taps: &[i8; 8], out: &mu
 /// Dispatching u16-source vertical 8-tap. `src.len() >= 7*stride + out.len()`.
 #[inline]
 pub fn fir8_col_u16(src: &[u16], stride: usize, taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp_max: i32) {
-    debug_assert!(src.len() >= 7 * stride + out.len());
+    assert!(col_fits(src.len(), stride, out.len()), "fir8 col source too short");
     #[cfg(target_arch = "x86_64")]
     if simd_level() >= 1 {
         // SAFETY: avx2 verified; bounds asserted.
@@ -468,7 +391,7 @@ unsafe fn avg_row_neon(a: &[i32], b: &[i32], out: &mut [i32], clamp_max: i32) {
 /// Dispatching compound average over a row (`a.len() == b.len() == out.len()`).
 #[inline]
 pub fn avg_row(a: &[i32], b: &[i32], out: &mut [i32], clamp_max: i32) {
-    debug_assert!(a.len() >= out.len() && b.len() >= out.len());
+    assert!(a.len() >= out.len() && b.len() >= out.len(), "blend input too short");
     #[cfg(target_arch = "x86_64")]
     if simd_level() >= 1 {
         // SAFETY: avx2 verified; bounds asserted.
@@ -546,7 +469,7 @@ unsafe fn w_avg_row_neon(a: &[i32], b: &[i32], out: &mut [i32], wt: i32, clamp_m
 /// Dispatching weighted average.
 #[inline]
 pub fn w_avg_row(a: &[i32], b: &[i32], out: &mut [i32], wt: i32, clamp_max: i32) {
-    debug_assert!(a.len() >= out.len() && b.len() >= out.len());
+    assert!(a.len() >= out.len() && b.len() >= out.len(), "blend input too short");
     #[cfg(target_arch = "x86_64")]
     if simd_level() >= 1 {
         // SAFETY: avx2 verified; bounds asserted.
@@ -631,7 +554,7 @@ unsafe fn mask_row_neon(a: &[i32], b: &[i32], m: &[u8], out: &mut [i32], clamp_m
 /// Dispatching per-pixel mask blend ((a*m + b*(64-m) + 512) >> 10).
 #[inline]
 pub fn mask_row(a: &[i32], b: &[i32], m: &[u8], out: &mut [i32], clamp_max: i32) {
-    debug_assert!(a.len() >= out.len() && b.len() >= out.len() && m.len() >= out.len());
+    assert!(a.len() >= out.len() && b.len() >= out.len() && m.len() >= out.len(), "blend input too short");
     #[cfg(target_arch = "x86_64")]
     if simd_level() >= 1 {
         // SAFETY: avx2 verified; bounds asserted.
@@ -664,21 +587,109 @@ mod tests {
         x
     }
 
+    /// The vector arm must be live on any host that has it, or every comparison below is the
+    /// scalar twin checked against itself and passes without testing anything.
     #[test]
-    fn fir8_row_matches_scalar() {
-        let mut st = 0x12345678u64;
-        for trial in 0..200 {
-            let n = 1 + (xorshift(&mut st) % 130) as usize;
-            let src: Vec<i32> = (0..n + 7).map(|_| (xorshift(&mut st) % 1024) as i32).collect();
-            let taps: [i8; 8] = core::array::from_fn(|_| (xorshift(&mut st) as i8) / 2);
-            let (rnd, sh) = ([2i32, 32, 34, 512][trial % 4], [2i32, 6, 6, 10][trial % 4]);
-            let clamp = if trial % 2 == 0 { 255 } else { -1 };
-            let mut a = vec![0i32; n];
-            let mut b = vec![0i32; n];
-            fir8_row_scalar(&src, &taps, &mut a, rnd, sh, clamp);
-            fir8_row(&src, &taps, &mut b, rnd, sh, clamp);
-            assert_eq!(a, b, "fir8_row trial {trial} n={n}");
+    fn vector_arm_is_live_on_this_host() {
+        if std::env::var("RUSTY_AV2D_NOSIMD").is_ok() {
+            return;
         }
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(simd_level(), std::arch::is_x86_feature_detected!("avx2") as u32);
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(simd_level(), 1);
+    }
+
+    /// Every kernel against its twin, in every clamp mode production uses and beyond: full-range
+    /// taps, sources up to 14 bits, extreme values, and every tail length.
+    #[test]
+    fn kernels_match_scalar_across_the_full_matrix() {
+        let mut st = 0x9e3779b97f4a7c15u64;
+        let clamps = [-1i32, 255, 1023, 4095];
+        let shifts = [(2i32, 2i32), (32, 6), (34, 6), (512, 10), (1024, 11)];
+        let peaks = [255u64, 1023, 4095, 16383];
+        for trial in 0..6000usize {
+            let n = 1 + trial % 140;
+            let stride = n + (xorshift(&mut st) % 9) as usize;
+            let peak = peaks[(xorshift(&mut st) % 4) as usize];
+            let extreme = trial % 3 == 0;
+            let u: Vec<u16> = (0..7 * stride + n + 8)
+                .map(|_| {
+                    let r = xorshift(&mut st);
+                    (if extreme { (r & 1) * peak } else { r % (peak + 1) }) as u16
+                })
+                .collect();
+            let i: Vec<i32> = u.iter().map(|&x| x as i32 - peak as i32 / 3).collect();
+            let taps: [i8; 8] = core::array::from_fn(|_| {
+                let r = xorshift(&mut st);
+                if extreme {
+                    [127, -128][(r & 1) as usize]
+                } else {
+                    r as i8
+                }
+            });
+            let (rnd, sh) = shifts[trial % 5];
+            let clamp = clamps[(trial / 5) % 4];
+            let (mut a, mut b) = (vec![7i32; n], vec![7i32; n]);
+
+            fir8_col_scalar(&i, stride, &taps, &mut a, rnd, sh, clamp);
+            fir8_col(&i, stride, &taps, &mut b, rnd, sh, clamp);
+            assert_eq!(a, b, "fir8_col trial {trial} n={n} clamp={clamp}");
+            fir8_row_u16_scalar(&u, &taps, &mut a, rnd, sh, clamp);
+            fir8_row_u16(&u, &taps, &mut b, rnd, sh, clamp);
+            assert_eq!(a, b, "fir8_row_u16 trial {trial} n={n} clamp={clamp}");
+            fir8_col_u16_scalar(&u, stride, &taps, &mut a, rnd, sh, clamp);
+            fir8_col_u16(&u, stride, &taps, &mut b, rnd, sh, clamp);
+            assert_eq!(a, b, "fir8_col_u16 trial {trial} n={n} clamp={clamp}");
+
+            // Blends always clamp.
+            let bd = if clamp < 0 { 255 } else { clamp };
+            let (s1, s2) = (&i[..n], &i[stride..stride + n]);
+            let wt = (xorshift(&mut st) % 17) as i32;
+            let m: Vec<u8> = (0..n)
+                .map(|_| {
+                    let r = xorshift(&mut st);
+                    if extreme {
+                        [0, 64][(r & 1) as usize]
+                    } else {
+                        (r % 65) as u8
+                    }
+                })
+                .collect();
+            avg_row_scalar(s1, s2, &mut a, bd);
+            avg_row(s1, s2, &mut b, bd);
+            assert_eq!(a, b, "avg trial {trial} n={n} clamp={bd}");
+            w_avg_row_scalar(s1, s2, &mut a, wt, bd);
+            w_avg_row(s1, s2, &mut b, wt, bd);
+            assert_eq!(a, b, "w_avg trial {trial} n={n} clamp={bd}");
+            mask_row_scalar(s1, s2, &m, &mut a, bd);
+            mask_row(s1, s2, &m, &mut b, bd);
+            assert_eq!(a, b, "mask trial {trial} n={n} clamp={bd}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "fir8 row source too short")]
+    fn short_row_source_is_refused() {
+        fir8_row_u16(&[0; 14], &[0; 8], &mut [0; 8], 0, 0, -1);
+    }
+
+    #[test]
+    #[should_panic(expected = "fir8 col source too short")]
+    fn short_col_source_is_refused() {
+        fir8_col(&[0; 8], 16, &[0; 8], &mut [0; 8], 0, 0, -1);
+    }
+
+    #[test]
+    #[should_panic(expected = "fir8 col source too short")]
+    fn wrapping_stride_is_refused() {
+        fir8_col_u16(&[0; 64], usize::MAX / 7 + 1, &[0; 8], &mut [0; 8], 0, 0, -1);
+    }
+
+    #[test]
+    #[should_panic(expected = "blend input too short")]
+    fn short_blend_input_is_refused() {
+        mask_row(&[0; 8], &[0; 8], &[0; 4], &mut [0; 8], 255);
     }
 
     #[test]
