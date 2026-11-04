@@ -83,6 +83,8 @@ pub struct Frame {
     /// (DC/SMOOTH/SMOOTH_V/SMOOTH_H/PAETH), 5..60 = directional (`5 + midx`). Drives both the
     /// neighbour-based mode-list reordering and the edge-filter smooth `type`. 0 = DC (default).
     pub joint: Vec<u8>,
+    /// Visible size `(w, h, chroma w, chroma h)`, while `pl` still holds the coded area.
+    pub crop: (usize, usize, usize, usize),
     pub iw4: usize,
     pub ih4: usize,
     /// Deblock edge grids (per-4×4 cell, `iw4*ih4`). `db_left`/`db_top` mark a block-left
@@ -823,9 +825,21 @@ pub fn load_ref_frame1_from_stash() -> bool {
     })
 }
 
+/// Block-grid extent, in 4px cells, of a frame dimension: AV2 codes whole 8x8 blocks, so the
+/// grid is 8px-aligned (avm `mi_cols`, dav2d `f->bw`), not `ceil(px / 4)`.
+pub fn mi_dim(px: usize) -> usize {
+    ((px + 7) >> 3) << 1
+}
+
 /// Allocate/clear the frame buffer for a `w`×`h` (luma) 4:2:0 frame.
 /// `bdmax` = (1 << bitdepth) − 1 (255 for 8-bit, 1023 for 10-bit).
-pub fn reset_frame(w: usize, h: usize, yac: u8, edge_filter: bool, ibp: bool, bdmax: i32) {
+///
+/// The planes cover the 8px-aligned coded area, not `w`×`h`: blocks reconstruct past the visible
+/// edge, later blocks predict from those samples, every in-loop filter covers the whole grid,
+/// and references keep them too (avm extend_frame extends from `heights`, dav2d MC clamps at
+/// `f->bh * 4`). Only output is cropped: see [`visible_planes`].
+pub fn reset_frame(crop_w: usize, crop_h: usize, yac: u8, edge_filter: bool, ibp: bool, bdmax: i32) {
+    let (w, h) = (mi_dim(crop_w) * 4, mi_dim(crop_h) * 4);
     FRAME_NO.with(|c| c.set(c.get() + 1));
     // Size the per-4px filter grid to THIS frame (no wrapping masks — see FILTER_GRID).
     {
@@ -848,6 +862,7 @@ pub fn reset_frame(w: usize, h: usize, yac: u8, edge_filter: bool, ibp: bool, bd
         f.pl[0] = Plane::alloc(w, h);
         f.pl[1] = Plane::alloc(cw, ch);
         f.pl[2] = Plane::alloc(cw, ch);
+        f.crop = (crop_w, crop_h, (crop_w + ss_hor as usize) >> ss_hor, (crop_h + ss_ver as usize) >> ss_ver);
         f.yac = yac;
         f.bitdepth_max = bdmax;
         BDMAX.with(|b| b.set(bdmax));
@@ -1571,6 +1586,32 @@ fn stage_cmp(tag: &str, pl0: &[i32], pl1: &[i32], pl2: &[i32], w: usize, h: usiz
     }
 }
 
+/// A decoded picture cut down to its visible size, for output.
+pub fn visible_planes(planes: [Plane; 3]) -> [Plane; 3] {
+    let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
+    let mut sizes = [(vw, vh), (vcw, vch), (vcw, vch)].into_iter();
+    planes.map(|p| {
+        let (w, h) = sizes.next().unwrap();
+        if (p.w, p.h) == (w, h) {
+            return p;
+        }
+        let mut out = Plane::alloc(w, h);
+        for y in 0..h {
+            out.px[y * w..(y + 1) * w].copy_from_slice(&p.px[y * p.stride..y * p.stride + w]);
+        }
+        out
+    })
+}
+
+/// The top-left `w`×`h` of a `stride`-major plane.
+fn crop_plane(src: &[i32], stride: usize, w: usize, h: usize) -> Vec<i32> {
+    let mut out = Vec::with_capacity(w * h);
+    for row in src.chunks_exact(stride).take(h) {
+        out.extend_from_slice(&row[..w]);
+    }
+    out
+}
+
 pub fn filter_frame_chain(gdf_ref_dst: usize) {
     use crate::av2_deblock::{deblock_plane, deblock_quant_thr, deblock_side_thr, MAX_WIDTH_UV_TBL, MAX_WIDTH_Y_TBL};
     use crate::av2_filter::{adjust_strength, cdef_block, cdef_find_dir, ccso_score, CCSO_POS};
@@ -1673,9 +1714,10 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     if let Ok(path) = std::env::var("MPRE") {
         thread_local! { static PRE_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
         let n = PRE_N.with(|c| { let v = c.get(); c.set(v + 1); v });
+        let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
         let mut out: Vec<u8> = Vec::with_capacity(w * h * 3 / 2);
-        for p in [&pl0, &pl1, &pl2] {
-            out.extend(p.iter().map(|v| (*v).clamp(0, 255) as u8));
+        for (p, stride, pw, ph) in [(&pl0, w, vw, vh), (&pl1, cw, vcw, vch), (&pl2, cw, vcw, vch)] {
+            out.extend(crop_plane(p, stride, pw, ph).iter().map(|v| (*v).clamp(0, 255) as u8));
         }
         let _ = std::fs::write(format!("{path}_{n}.yuv"), &out);
     }
@@ -2064,11 +2106,10 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     if std::env::var("MFIN").is_ok() {
         thread_local! { static FIN_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
         let n = FIN_N.with(|c| { let v = c.get(); c.set(v + 1); v });
+        let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
         let mut out: Vec<u8> = Vec::with_capacity(w * h * 3 / 2);
-        for v in &pl0 { out.push((*v).clamp(0, 255) as u8); }
-        for p in [&pl1, &pl2] {
-            for v in p.iter() { out.push((*v).clamp(0, 255) as u8); }
-                if !crate::av2_recon::work_tick("frm:1947") { break; }
+        for (p, stride, pw, ph) in [(&pl0, w, vw, vh), (&pl1, cw, vcw, vch), (&pl2, cw, vcw, vch)] {
+            out.extend(crop_plane(p, stride, pw, ph).iter().map(|v| (*v).clamp(0, 255) as u8));
         }
         let _ = std::fs::write((crate::av2_recon::cap_path(&format!("mine_fin_{n}.yuv"))), &out);
     }

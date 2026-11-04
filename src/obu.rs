@@ -571,7 +571,7 @@ fn parse_av2_frame_hdr_front(
                     nb2, poc2, n_ref_frames as usize, &refidx, &refpoc2,
                     use_ref_frame_mvs, seq_mv_traj2, seq_tip != 0,
                     tip_frame_mode, frame_tip_hole_fill,
-                    ((width + 3) / 4) as usize, ((height + 3) / 4) as usize,
+                    crate::av2_frame::mi_dim(width as usize), crate::av2_frame::mi_dim(height as usize),
                     tmvp_sample_step,
                 );
             }
@@ -1794,7 +1794,7 @@ fn parse_seq_hdr(
         crate::av2_recon::SEQ_TOOLS.with(|c| { let mut t = c.get(); t.bawp = seq_bawp; c.set(t); });
         // Size the neighbour contexts from THIS sequence's max frame dims (lifts the old
         // fixed-128 / 512px scaffold cap).
-        crate::av2_recon::set_nb_len((max_width as usize + 3) / 4, (max_height as usize + 3) / 4);
+        crate::av2_recon::set_nb_len(crate::av2_frame::mi_dim(max_width as usize), crate::av2_frame::mi_dim(max_height as usize));
         // transform-group tools (551)
         let fsc = gb.get_bit();
         if !fsc {
@@ -2562,7 +2562,8 @@ fn emit_av2_output(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult<()> 
             break;
         }
         picked[cand] = true;
-        if let Some(mut p) = crate::av2_frame::REF_PICS.with(|rp| rp.borrow()[cand].clone()) {
+        if let Some(p) = crate::av2_frame::REF_PICS.with(|rp| rp.borrow()[cand].clone()) {
+            let mut p = crate::av2_frame::visible_planes(p);
             if let Some((id, seed)) = crate::av2_grain::GRAIN_SLOTS.with(|g| g.borrow()[cand]) {
                 crate::av2_grain::apply_grain_to_planes(&mut p, id, seed);
             }
@@ -2576,6 +2577,7 @@ fn emit_av2_output(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult<()> 
         [f.pl[0].clone(), f.pl[1].clone(), f.pl[2].clone()]
     });
     if cur_planes[0].w != 0 {
+        cur_planes = crate::av2_frame::visible_planes(cur_planes);
         if let Some((id, seed)) = crate::av2_grain::CUR_GRAIN.with(|c| c.get()) {
             crate::av2_grain::apply_grain_to_planes(&mut cur_planes, id, seed);
         }
@@ -2602,7 +2604,8 @@ fn emit_av2_output(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult<()> 
             break;
         }
         picked[found] = true;
-        if let Some(mut p) = crate::av2_frame::REF_PICS.with(|rp| rp.borrow()[found].clone()) {
+        if let Some(p) = crate::av2_frame::REF_PICS.with(|rp| rp.borrow()[found].clone()) {
+            let mut p = crate::av2_frame::visible_planes(p);
             dpb = slots[found].as_ref().unwrap().order_hint;
             if let Some((id, seed)) = crate::av2_grain::GRAIN_SLOTS.with(|g| g.borrow()[found]) {
                 crate::av2_grain::apply_grain_to_planes(&mut p, id, seed);
@@ -2921,8 +2924,8 @@ fn parse_obus(
                 };
                 let f2w = seq_hdr.max_width as usize;
                 let f2h = seq_hdr.max_height as usize;
-                let f2iw4 = (f2w + 3) / 4;
-                let f2ih4 = (f2h + 3) / 4;
+                let f2iw4 = crate::av2_frame::mi_dim(f2w);
+                let f2ih4 = crate::av2_frame::mi_dim(f2h);
                 crate::av2_recon::work_reset();
                 crate::av2_refmvs::reset_refmvs();
                 crate::av2_frame::F2_YAC.with(|cc| cc.set(yac));
@@ -3042,8 +3045,8 @@ fn parse_obus(
                     // 432×240 → decoded off-frame SBs at bx4=80/96 for a 320-wide clip).
                     let f2w = seq_hdr.max_width as usize;
                     let f2h = seq_hdr.max_height as usize;
-                    let f2iw4 = (f2w + 3) / 4;
-                    let f2ih4 = (f2h + 3) / 4;
+                    let f2iw4 = crate::av2_frame::mi_dim(f2w);
+                    let f2ih4 = crate::av2_frame::mi_dim(f2h);
                     // Fresh temporal motion field for this frame (saved to ref slots at emit).
                     crate::av2_refmvs::rp_reset(f2iw4 as usize, f2ih4 as usize);
                     crate::av2_palette::pal_reset(f2iw4 as usize, f2ih4 as usize);
@@ -3501,8 +3504,8 @@ fn parse_obus(
                 // (432x240, gdf/cdef/ccso on) takes the exact same path as before.
                 let fw = seq_hdr.max_width as usize;
                 let fh = seq_hdr.max_height as usize;
-                let iw4 = (fw + 3) / 4;
-                let ih4 = (fh + 3) / 4;
+                let iw4 = crate::av2_frame::mi_dim(fw);
+                let ih4 = crate::av2_frame::mi_dim(fh);
                 sb.iw4 = iw4;
                 sb.ih4 = ih4;
                 crate::av2_recon::HDR_TOOL_CFG.with(|c| {
@@ -3542,8 +3545,8 @@ fn parse_obus(
                 crate::av2_recon::work_reset();
                 crate::av2_refmvs::reset_refmvs();
                 crate::av2_palette::pal_reset(
-                    (seq_hdr.max_width as usize + 3) / 4,
-                    (seq_hdr.max_height as usize + 3) / 4,
+                    crate::av2_frame::mi_dim(seq_hdr.max_width as usize),
+                    crate::av2_frame::mi_dim(seq_hdr.max_height as usize),
                 );
                 let tinfo2 = crate::av2_recon::TILE_INFO.with(|t| t.get());
                 let n_tiles2 = tinfo2.cols as usize * tinfo2.rows as usize;

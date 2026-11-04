@@ -1733,7 +1733,7 @@ pub struct SbState<'a> {
     /// The last decoded ccso flag per plane — the left-neighbour ccso context for the next
     /// 256px-aligned ccso block (dav2d `t->lf_mask[-1].ccso[p]`). Reset to 0 at the row start.
     pub left_ccso: [u8; 3],
-    /// Frame dimensions in 4px units (`iw4 = (w+3)/4`, `ih4 = (h+3)/4`) — for the partition
+    /// Frame dimensions in 4px units (`av2_frame::mi_dim`) — for the partition
     /// frame-boundary forcing + out-of-frame child-skip on partial edge SBs.
     pub iw4: usize,
     pub ih4: usize,
