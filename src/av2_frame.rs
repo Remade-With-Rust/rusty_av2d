@@ -1560,7 +1560,7 @@ pub fn run_gdf_verify(ccso_path: &str, all_path: &str, deblk_path: &str) {
     let dblk: Vec<i32> = (0..w * h).map(|i| deblk[i] as i32).collect();
     let mut out = luma.clone();
     crate::av2_gdf::gdf_filter_frame(
-        &luma, &dblk, &mut out, w, h, 8, yac, cfg.mode, cfg.qp_idx, cfg.scale_idx, FRAME.with(|fr| fr.borrow().gdf_bs_px as i32), &gdf_blk, 0,
+        &luma, &dblk, &mut out, w, h, 8, yac, cfg.mode, cfg.qp_idx, cfg.scale_idx, FRAME.with(|fr| fr.borrow().gdf_bs_px as i32), &gdf_blk, 0, &gdf_tile_rows(h as i32)
     );
     score_filtered("C4 GDF-Y", &out, &all, &ccso, 0, w, h);
 }
@@ -1614,6 +1614,18 @@ fn crop_plane(src: &[i32], stride: usize, w: usize, h: usize) -> Vec<i32> {
         out.extend_from_slice(&row[..w]);
     }
     out
+}
+
+/// Each tile row's (top, bottom) in luma pixels; the last row ends at the plane height `h`.
+fn gdf_tile_rows(h: i32) -> Vec<(i32, i32)> {
+    let ti = crate::av2_recon::TILE_INFO.with(|c| c.get());
+    let n = ti.rows as usize;
+    (0..n)
+        .map(|r| {
+            let bottom = if r + 1 == n { h } else { ti.row_start4[r + 1] as i32 * 4 };
+            (ti.row_start4[r] as i32 * 4, bottom)
+        })
+        .collect()
 }
 
 /// AVM `init_tip_lf_parameter` + `loop_filter_tip_frame`: deblock a TIP-as-output frame in place.
@@ -2151,7 +2163,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         let guided: &Vec<i32> = lr_src.as_ref().unwrap_or(&pl0);
         // gdf_get_ref_dst_idx (avm): 0 for the INTRA keyframe → intra GDF tables; 1 for the
         // frame-2 INTER single-ref dist-1 → inter GDF tables. Passed in by the caller per frame.
-        crate::av2_gdf::gdf_filter_frame(guided, &deblk_luma, &mut out, w, h, (bdmax + 1).trailing_zeros() as i32, yac, gcfg.mode, gcfg.qp_idx, gcfg.scale_idx, FRAME.with(|fr| fr.borrow().gdf_bs_px as i32), &gdf_blk, gdf_ref_dst);
+        crate::av2_gdf::gdf_filter_frame(guided, &deblk_luma, &mut out, w, h, (bdmax + 1).trailing_zeros() as i32, yac, gcfg.mode, gcfg.qp_idx, gcfg.scale_idx, FRAME.with(|fr| fr.borrow().gdf_bs_px as i32), &gdf_blk, gdf_ref_dst, &gdf_tile_rows(h as i32));
         pl0 = out;
     }
 

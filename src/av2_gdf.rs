@@ -425,6 +425,8 @@ pub fn gdf_filter_frame(
     block_flags: &[bool],
     // 0 = intra frame; 1..=5 = inter (avm gdf_get_ref_dst_idx: frame-2 single-ref dist-1 → 1).
     ref_dst_idx: usize,
+    // (top, bottom) of each tile row in pixels. Stripes and block rows restart at every tile row.
+    tile_rows: &[(i32, i32)],
 ) {
     crate::prof_scope!(9);
     let pxl_max = (1 << bit_depth) - 1;
@@ -493,15 +495,21 @@ pub fn gdf_filter_frame(
     let mut cls = vec![0u32; cls_stride * lap_rows];
     let mut err = vec![0i32; err_stride * unit_size as usize];
 
-    let tile_h = h as i32;
+    let frame_h = h as i32;
     let tile_w = w as i32;
-    // Stripe-major iteration (v_pos step 64 from -STRIPE_OFF). Per stripe, inject the post-deblock
-    // reference lines into the guided-copy borders (avm gdf_setup_reference_lines, copy_above/below
-    // = 1 for a single tile), process all units, then restore.
+    // Stripe-major iteration (v_pos step 64 from -STRIPE_OFF, per tile row). Per stripe, inject the
+    // post-deblock reference lines into the guided-copy borders (avm gdf_setup_reference_lines),
+    // process all units, then restore. Lines are not injected across an internal tile boundary.
+    for (tile_row, &(top, bottom)) in tile_rows.iter().enumerate() {
+    let tile_h = bottom - top;
+    // avm init_gdf gdf_vert_blks_per_tile: a trailing short stripe folds into the tile's last block.
+    let tile_blks = 1 + (tile_h - 1) / block_size;
     let mut v_pos = -STRIPE_OFF;
     while v_pos < tile_h {
-        let i_min = ((v_pos.max(FRAME_BOUNDARY)) + 1) & !1;
-        let i_max = ((v_pos + unit_size).min(tile_h - FRAME_BOUNDARY)) & !1;
+        let i_min = ((v_pos.max(FRAME_BOUNDARY) + top) + 1) & !1;
+        let i_max = ((v_pos + unit_size).min(tile_h - FRAME_BOUNDARY) + top) & !1;
+        let copy_above = v_pos != -STRIPE_OFF || tile_row == 0;
+        let copy_below = v_pos + unit_size < tile_h || tile_row == tile_rows.len() - 1;
         if i_max <= i_min {
             v_pos += unit_size;
             continue;
@@ -511,7 +519,7 @@ pub fn gdf_filter_frame(
         // boundary at the picture edge is the guided copy's own extension, not a cross-stripe line).
         let mut save: Vec<i32> = Vec::new();
         let mut rows: Vec<i32> = Vec::new();
-        if i_min > 0 {
+        if i_min > 0 && copy_above {
             for i in (-(VER_BORDER as i32))..0 {
                 if !crate::av2_recon::work_tick("gdf:498") { break; }
                 let dst = i_min + i;
@@ -520,7 +528,7 @@ pub fn gdf_filter_frame(
                 rows.push(dst);
             }
         }
-        if i_max < tile_h {
+        if i_max < frame_h && copy_below {
             for i in 0..(VER_BORDER as i32) {
                 if !crate::av2_recon::work_tick("gdf:506") { break; }
                 let dst = i_max + i;
@@ -529,7 +537,7 @@ pub fn gdf_filter_frame(
                 rows.push(dst);
             }
         }
-        let br = ((v_pos + STRIPE_OFF) / block_size) as usize;
+        let br = (top / block_size + ((v_pos + STRIPE_OFF) / block_size).min(tile_blks - 1)) as usize;
         let mut u_pos = 0i32;
         while u_pos < tile_w {
             let j_min = ((u_pos.max(FRAME_BOUNDARY)) + 1) & !1;
@@ -561,5 +569,6 @@ pub fn gdf_filter_frame(
         }
         restore_rows(&mut inp, &rows, &save);
         v_pos += unit_size;
+    }
     }
 }
