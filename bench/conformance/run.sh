@@ -10,7 +10,8 @@
 #   DAV2D=/path/to/dav2d     (optional second oracle, for streams it supports)
 #   RUSTY_AV2D=/path/to/our/decoder binary (default: ./target/release/dav1d)
 #
-# Env: ORACLE=avmdec  -> force the avm reference decoder as the oracle.
+# Env: ORACLE=dav2d   -> use dav2d instead of avmdec, the default and normative oracle. dav2d is
+#                        known to differ from AVM (the delta-Q escape in read_delta_q).
 #      KEEP=1         -> keep the per-stream ref/mine YUVs for inspection.
 # Exit status is non-zero if any stream FAILs (usable as a CI gate).
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -39,7 +40,7 @@ decode_oracle() { # <ivf> <out.yuv>
       return
       ;;
   esac
-  if [ "${ORACLE:-dav2d}" = avmdec ]; then
+  if [ "${ORACLE:-avmdec}" = avmdec ]; then
     "$avmdec" --rawvideo --i420 -o "$2" "$1" >/dev/null 2>&1
   else
     "$dav2d" --demuxer ivf --threads 1 -i "$1" -o "$2" >/dev/null 2>&1
@@ -65,5 +66,5 @@ for ivf in "$corpus"/$pat.ivf; do
   fi
   [ "${KEEP:-0}" = 1 ] || rm -f "$ref" "$out"
 done
-echo "---- ${ORACLE:-dav2d} oracle: $pass passed, $fail failed, $skip skipped ----"
+echo "---- ${ORACLE:-avmdec} oracle: $pass passed, $fail failed, $skip skipped ----"
 [ "$fail" -eq 0 ]

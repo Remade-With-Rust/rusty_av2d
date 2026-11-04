@@ -10,17 +10,17 @@ avmenc  ──encode──▶  corpus/<name>.ivf  ──decode──▶  {dav2d 
                                                                    cmp ref.yuv mine.yuv
 ```
 
-The oracle is **dav2d** (the decoder rav2d is built to match); `ORACLE=avmdec` cross-checks
-against the AVM **reference** decoder. On the golden clip all three agree byte-for-byte.
+The oracle is the AVM **reference** decoder. `ORACLE=dav2d` cross-checks against dav2d, which
+is known to differ from AVM on the delta-Q escape, so clips using it fail under that oracle.
 
 ## Tools
 - `mksrc.py <out.yuv> <w> <h> <nframes> [seed]` — synthesize a raw I420 source (moving box +
   gradients + light noise → real signal for intra **and** inter tools).
 - `gen.sh <name> <src.yuv> <w> <h> <nframes> [avmenc flags…]` — encode a source into
   `corpus/<name>.ivf` and append to `manifest.txt`. Env: `QP` (0–255, default 128),
-  `CPU` (avmenc speed), `KFMAX` (keyframe interval).
+  `CPU` (avmenc speed), `KFMAX` (keyframe interval), `AVMENC` (encoder binary).
 - `run.sh [name-glob]` — decode every matching corpus stream with the oracle and with rav2d,
-  `cmp` the two, print PASS/FAIL. Exit non-zero if any FAIL (CI gate). Env: `ORACLE=avmdec`,
+  `cmp` the two, print PASS/FAIL. Exit non-zero if any FAIL (CI gate). Env: `ORACLE=dav2d`,
   `KEEP=1` (keep the per-stream YUVs under `$TMPDIR/rav2d_conf`).
 
 ## Layout

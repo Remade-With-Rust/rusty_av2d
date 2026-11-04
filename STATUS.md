@@ -6,18 +6,20 @@
 
 ## What is verified
 
-Every clip in a **46-clip conformance corpus** decodes **byte-identical** to the
-reference decoders (AOM's `avmdec`, and `dav2d` where it supports the stream).
-The suite also runs 111 unit/integration tests. Both gate every change.
+Every clip in a **69-clip conformance corpus** decodes **byte-identical** to AOM's
+`avmdec`. The suite also runs 125 unit/integration tests. Both gate every change.
+The nine 130-frame real-content streams from
+[issue #14](https://github.com/Remade-With-Rust/rusty_av2d/issues/14) also matched
+when that issue was fixed; they aren't vendored, so the gate doesn't rerun them.
 
 Coverage includes: all intra modes, compound prediction and B-pyramids, TIP
 (including TIP-as-output), the warp family, all four in-loop filters, delta-Q,
 loop restoration, wedge compound, TX partitioning, 128px superblocks and their
-cross-products, the full {8,10-bit} x {4:2:0, 4:2:2, 4:4:4} matrix, film grain,
+cross-products, one clip of each {8,10-bit} x {4:2:0, 4:2:2, 4:4:4} combination, film grain,
 S-frames, palette / screen content, and quantization matrices. Eleven of the
 clips are single-tool-disabled controls that verify each sequence-header tool
-gate in both directions. Two clips (640x360, 424x240) cover frame dimensions
-that are not superblock-aligned on either axis.
+gate in both directions. Twelve clips (the `r*` and `t*` names) cover frame
+dimensions that are not multiples of 8, including odd ones, in 8-bit 4:2:0.
 
 ## Known limitations — read before using
 
@@ -47,6 +49,17 @@ that are not superblock-aligned on either axis.
    (all silent unless `RUSTY_AV2D_DEBUG=1`).
 5. **Threading is under-tested.** Correctness is gated single-threaded;
    multi-threaded output has only been spot-checked.
+6. **Formats other than 8-bit 4:2:0 are thinly verified, and known to fail on
+   some streams.** Eight-frame `--cpu-used=6 --qp=160` clips at 272x152 from
+   `mksrc.py` differ from `avmdec` in 10-bit, 4:2:2 and 4:4:4, and decoding a
+   `--monochrome` clip panics. The corpus clips for these formats pass, but they
+   do not reach whatever these streams use. Treat these formats as unproven.
+7. **Some tools are refused.** These return an error and a non-zero CLI exit
+   rather than emit wrong pixels: segmentation (`--aq-mode`), frames coding
+   non-identity global motion, `--disable-loopfilters-across-tiles=1` with more
+   than one tile, `tip_explicit_qp`, and segmented quantization matrices.
+8. **Sequence-level q offsets are untested.** `base_ydc/uvdc/uvac_dq` follow AVM
+   by inspection, but `avmenc` always codes them as 0, so no clip exercises them.
 
 ### Previously-known, now resolved
 
@@ -55,7 +68,11 @@ Earlier revisions rejected frames whose dimensions were not a multiple of 16
 intrabc `morph_pred` refinement was parsed but never applied at recon
 (key-frame corruption), and the frame-edge chroma-reference boundary clause was
 missing from the extended-partition gates (inter-frame entropy desync at
-partial superblocks). No dimension restriction remains.
+partial superblocks).
+
+Dimensions that are not multiples of 8 were still wrong from the first frame
+until issue #14: frames decode on the 8px-aligned coded area and are cropped
+only at output. In 8-bit 4:2:0 no dimension restriction is known to remain.
 
 ## Robustness
 

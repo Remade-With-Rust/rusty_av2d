@@ -28,3 +28,15 @@ v432_8f_sframe             432x240    8f  qp=128  --enable-sframe=1 --sframe-dis
 v432_4f_grain32            432x240    4f  qp=128  --film-grain-test=9 --film-grain-block-size=1
 v640x360                   640x360    2f  qp=128  
 v424x240                   424x240    2f  qp=128  
+r270x480_16f_q110            270x480   16f  qp=110  --cpu-used=6
+r270x480_48f_q210            270x480   48f  qp=210  --cpu-used=6; delta-Q escape, BAWP at the coded-area edge, EOS flush
+r480x270_24f_q160            480x270   24f  qp=160  --cpu-used=6
+r480x270_48f_q210            480x270   48f  qp=210  --cpu-used=6; odd-column block on an SB top row (warp ctx)
+r638x358_12f_q160            638x358   12f  qp=160  --cpu-used=6
+r271x269_8f_q160             271x269    8f  qp=160  --cpu-used=6; odd dimensions
+r270x150_8f_sb128            270x150    8f  qp=160  --cpu-used=6 --sb-size=128
+r270x270_6f_t4               270x270    6f  qp=160  --cpu-used=6 --tile-rows=1 --tile-columns=1; GDF per tile row
+t270x150_34f_tip             270x150   34f  qp=210  --cpu-used=6; pure-translation source; TIP-as-output
+t270x150_34f_tipdb           270x150   34f  qp=245  --cpu-used=6; pure-translation source; deblocked TIP-as-output
+r270x150_8f_gm               270x150    8f  qp=160  --cpu-used=6 --enable-global-motion=1; frames code use_global_motion=0
+r270x150_8f_noimp            270x150    8f  qp=160  --cpu-used=6 --enable-imp-msk-bld=0

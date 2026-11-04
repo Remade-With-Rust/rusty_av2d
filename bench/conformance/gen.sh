@@ -10,7 +10,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
-avmenc="$root/av2_literature/repos/avm/build_rs/avmenc.exe"
+avmenc="${AVMENC:-$root/av2_literature/repos/avm/build_rs/avmenc.exe}"
 corpus="$here/corpus"
 mkdir -p "$corpus"
 

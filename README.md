@@ -8,7 +8,7 @@ FREE RAG Converter Online -- <a href="https://RAGconverter.com">RAGconverter.com
 
 `rusty_av2d` decodes [AV2](https://aomedia.org/) — the successor to AV1 currently
 being developed by the Alliance for Open Media — and produces output that is
-**byte-identical to the AVM reference decoder** across a 57-clip conformance
+**byte-identical to the AVM reference decoder** across a 69-clip conformance
 corpus covering every major tool in the format.
 
 [![crates.io](https://img.shields.io/crates/v/rusty_av2d.svg)](https://crates.io/crates/rusty_av2d)
@@ -34,10 +34,9 @@ build is red.
 
 ## What "byte-identical" means here
 
-57 clips, each decoded and compared byte-for-byte against AOM's `avmdec`
-(and against `dav2d` where it supports the stream). Any mismatch fails the
-gate. Alongside them run 112 unit and integration tests. Both must pass before
-any change lands.
+69 clips, each decoded and compared byte-for-byte against AOM's `avmdec`. Any
+mismatch fails the gate. Alongside them run 125 unit and integration tests. Both
+must pass before any change lands.
 
 The corpus exercises:
 
@@ -49,8 +48,8 @@ The corpus exercises:
 | Transforms | TX partitioning, secondary transforms, quantization matrices |
 | In-loop filters | Deblocking, CDEF, loop restoration, CCSO, GDF |
 | Frame types | Key, inter, S-frames, film grain, delta-Q |
-| Geometry | 64px and 128px superblocks, arbitrary (non-aligned) frame dimensions |
-| Formats | Full {8-bit, 10-bit} × {4:2:0, 4:2:2, 4:4:4} matrix |
+| Geometry | 64px and 128px superblocks, frame dimensions not multiples of 8, odd dimensions |
+| Formats | {8-bit, 10-bit} × {4:2:0, 4:2:2, 4:4:4}, one clip each ([gaps](STATUS.md#known-limitations--read-before-using)) |
 | Tiling | Multi-tile streams and their cross-products |
 
 Eleven of the clips are single-tool-disabled controls: each one turns off
@@ -118,6 +117,10 @@ loop {
         Err(e) => return Err(e.into()),
     }
 }
+
+// At end of stream, signal it and drain once more: some pictures are only output
+// when a later frame triggers them.
+dec.finish()?;
 ```
 
 A `Settings` builder controls thread count, frame delay, film-grain
@@ -134,7 +137,8 @@ let mut dec = Decoder::with_settings(&settings)?;
 
 ### The C ABI
 
-A C ABI is also exported (`dav1d_open`, `dav1d_send_data`, `dav1d_get_picture`,
+A C ABI is also exported, where sending empty data signals end of stream
+(`dav1d_open`, `dav1d_send_data`, `dav1d_get_picture`,
 …) so the crate can be linked as a `staticlib` by non-Rust callers. It is on by
 default via the `capi` feature.
 
