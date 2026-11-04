@@ -552,13 +552,13 @@ fn parse_av2_frame_hdr_front(
             } else if seq_opfl >= 3 {
                 opfl_refine_type = if gb.get_bit() { 1 } else { 2 * gb.get_bit() as u8 };
             }
-            let _ = tip_global_wtd_idx; // cwp table idx (dav2d_tip_wts) — 0 (=8, EQUAL) in corpus
             crate::av2_recon::HDR_TOOL_CFG.with(|c| {
                 let mut cfg = c.get();
                 cfg.tip_frame_mode = tip_frame_mode;
                 cfg.opfl_refine_type = opfl_refine_type;
                 cfg.tip_subpel_filter = tip_subpel_filter;
                 cfg.tip_gmv = tip_gmv;
+                cfg.tip_wt = crate::av2_recon::TIP_WTS[tip_global_wtd_idx as usize];
                 c.set(cfg);
             });
             // Temporal MV projection setup (dav refmvs_init_frame temporal part): mfmv list +
@@ -627,6 +627,7 @@ fn parse_av2_frame_hdr_front(
                 crate::av2_frame::CDEF_CFG.with(|c| { let mut f = c.get(); f.enabled = false; c.set(f); });
                 crate::av2_frame::CCSO_CFG.with(|c| { let mut f = c.borrow().clone(); f.enabled = false; *c.borrow_mut() = f; });
                 crate::av2_frame::GDF_CFG.with(|c| { let mut f = c.get(); f.enabled = false; c.set(f); });
+                crate::av2_lr::LR_CFG.with(|c| *c.borrow_mut() = Default::default());
                 crate::dlog!("[rav2d AV2 framehdr] *** TIP fm2 FRAME HEADER COMPLETE *** yac={yac2}");
                 return Ok((yac2 as u32, frame_type as u8));
             }

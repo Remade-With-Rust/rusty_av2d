@@ -533,6 +533,8 @@ pub struct HdrToolCfg {
     pub tip_subpel_filter: u8,
     /// frame `tip.gmv` (dav2d obu.c:1268, frame_mode==2 only): the whole-frame TIP block MV.
     pub tip_gmv: (i32, i32),
+    /// Compound weight of a TIP prediction, `TIP_WTS[tip.global_wtd_idx]` (8 = equal).
+    pub tip_wt: i8,
     /// frame `tip.apply_filter` (dav2d obu.c:1300, frame_mode==2 + seq db_sub_pu): deblock the
     /// synthesized TIP frame (levels forced 1). Default false.
     pub tip_apply_filter: bool,
@@ -570,7 +572,7 @@ thread_local! {
         std::cell::Cell::new(HdrToolCfg {
             gdf: true, cdef: true, ccso: true, allow_intrabc: true, cfl: true,
             cfl_ds_filter: 0, subpel_filter_mode: 4, mv_precision: 2, warp_motion: true,
-            tip_frame_mode: 0, tip_subpel_filter: 2, tip_gmv: (0, 0), tip_apply_filter: false,
+            tip_frame_mode: 0, tip_subpel_filter: 2, tip_gmv: (0, 0), tip_wt: 8, tip_apply_filter: false,
             skip_mode_enabled: false, bawp: true, allow_scc: false, force_integer_mv: 0,
             switchable_comp_refs: false,
             opfl_refine_type: 0, delta_q_present: false, delta_q_res_log2: 0,
@@ -983,7 +985,7 @@ pub fn reset_av2_stream_state() {
     HDR_TOOL_CFG.with(|c| c.set(HdrToolCfg {
         gdf: true, cdef: true, ccso: true, allow_intrabc: true, cfl: true,
         cfl_ds_filter: 0, subpel_filter_mode: 4, mv_precision: 2, warp_motion: true,
-        tip_frame_mode: 0, tip_subpel_filter: 2, tip_gmv: (0, 0), tip_apply_filter: false,
+        tip_frame_mode: 0, tip_subpel_filter: 2, tip_gmv: (0, 0), tip_wt: 8, tip_apply_filter: false,
         skip_mode_enabled: false, bawp: true, allow_scc: false, force_integer_mv: 0,
         switchable_comp_refs: false, opfl_refine_type: 0, delta_q_present: false,
         delta_q_res_log2: 0, tx_switchable: false,
@@ -3022,7 +3024,8 @@ fn tip_pred_luma(
     let (w, h) = (bw4 * 4, bh4 * 4);
     let mut tmp = [vec![0i32; w * h], vec![0i32; w * h]];
     // bacp deferred marker (seq imp_msk_bld=1, TIP cwp==8, no scaling)
-    let bacp = true;
+    let tip_wt = HDR_TOOL_CFG.with(|c| c.get()).tip_wt;
+    let bacp = tip_wt == 8;
     SEG_SCRATCH.with(|sc| sc.borrow_mut()[0] = 0xff);
     let mut have_bacp = false;
     // signed distance weights d (dav 2090-2092)
@@ -3187,7 +3190,11 @@ fn tip_pred_luma(
             comp_mask(luma_pred, w, &tmp[0], &tmp[1], w, h, &scr, bdmax_g());
         });
     } else {
-        comp_avg(luma_pred, w, &tmp[0], &tmp[1], w, h, bdmax_g());
+        if tip_wt == 8 {
+            comp_avg(luma_pred, w, &tmp[0], &tmp[1], w, h, bdmax_g());
+        } else {
+            crate::av2_inter::comp_w_avg(luma_pred, w, &tmp[0], &tmp[1], w, h, tip_wt as i32, bdmax_g());
+        }
     }
     step
 }
@@ -3254,7 +3261,7 @@ fn recon_inter_chroma(
                     let refidx = CUR_FRAME_REFIDX.with(|c| c.get()).1;
                     let (trf, wmv, bcwp): ([usize; 2], [crate::av2_refmvs::Mv; 2], i8) = if is_tip {
                         let t = crate::av2_refmvs::TMVS.with(|c| c.borrow().clone());
-                        ([t.tip_ref.0 as usize, t.tip_ref.1 as usize], [crate::av2_refmvs::Mv { y: 0, x: 0 }; 2], 8)
+                        ([t.tip_ref.0 as usize, t.tip_ref.1 as usize], [crate::av2_refmvs::Mv { y: 0, x: 0 }; 2], HDR_TOOL_CFG.with(|c| c.get()).tip_wt)
                     } else {
                         let &(mvp, refs, _ct, cwp, _ms, ref _sg, _mstr, _wi, _ws) = comp.as_ref().unwrap();
                         // block mvs are 1/8 LUMA; the window calc reads 1/16 CHROMA units.
@@ -5972,6 +5979,8 @@ const H_ADST: u8 = 50;
 const H_FLIPADST: u8 = 51;
 const IDTX_TT: u8 = 33;
 const PAETH_PRED: u8 = 12;
+/// TIP compound weights by `tip.global_wtd_idx` (dav2d `dav2d_tip_wts`).
+pub const TIP_WTS: [i8; 8] = [8, 12, 16, 18, 20, 4, 6, -4];
 /// Intra STX set remap, `[y_mode][coded symbol]` (dav2d `inv_most_probable_stx_mapping`).
 const INV_STX_SET_MAP: [[u8; 7]; 12] = [
     [6, 1, 0, 5, 4, 3, 2], // DC
