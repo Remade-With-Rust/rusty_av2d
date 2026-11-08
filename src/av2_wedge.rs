@@ -56,6 +56,13 @@ fn gen_master(mul: i32, wd: usize) -> Vec<u8> {
     master
 }
 
+/// The 128x128 master for (`mul`, direction `wd`). A master depends on nothing else, and every
+/// block size's mask set slices the same 40 of them, so each is generated at most once.
+fn master(mul: i32, wd: usize) -> &'static [u8] {
+    static MASTERS: [[OnceLock<Vec<u8>>; N_DIR]; 2] = [const { [const { OnceLock::new() }; N_DIR] }; 2];
+    MASTERS[(mul == 2) as usize][wd].get_or_init(|| gen_master(mul, wd))
+}
+
 fn copy2d(master: &[u8], w8: usize, h8: usize, x_off: usize, y_off: usize) -> Vec<u8> {
     let mut dst = vec![0u8; w8 * 8 * h8 * 8];
     let mut src = (64 - y_off * h8) * 128 + (64 - x_off * w8);
@@ -126,14 +133,8 @@ fn build_set(bw4: usize, bh4: usize) -> WedgeSet {
     let mul = if bw4 <= 4 && bh4 <= 4 { 2 } else { 1 };
     let mut masks: [Vec<Arc<Vec<u8>>>; 3] = [Vec::new(), Vec::new(), Vec::new()];
     let mut tmvp = Vec::new();
-    let mut wd = usize::MAX;
-    let mut master = Vec::new();
     for &(dir, xo, yo) in CODEBOOK.iter() {
-        if dir as usize != wd {
-            master = gen_master(mul, dir as usize);
-            wd = dir as usize;
-        }
-        let m444 = copy2d(&master, w8, h8, xo as usize, yo as usize);
+        let m444 = copy2d(master(mul, dir as usize), w8, h8, xo as usize, yo as usize);
         masks[1].push(Arc::new(subsample_422(&m444, w8, h8)));
         masks[2].push(Arc::new(subsample_420(&m444, w8, h8)));
         tmvp.push(Arc::new(fill_tmvp(&m444, w8, h8)));
