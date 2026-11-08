@@ -448,6 +448,8 @@ pub fn lr_filter_chroma(
             (s0, (s0 + band).min(ch))
         }
     };
+    // Per-unit neighbourhoods of the chroma plane and of the downsampled luma (see WIN_R).
+    let (mut win_c, mut win_l): (Vec<i32>, Vec<i32>) = (Vec::new(), Vec::new());
     let mut y0 = 0usize;
     while y0 < ch {
         if !crate::av2_recon::work_tick("av2_lr:chroma_stripe") { break; }
@@ -558,6 +560,21 @@ pub fn lr_filter_chroma(
                     continue;
                 }
             };
+            // `px` and `dsl` are pure functions of (x, y) inside the stripe: fetch the unit's
+            // neighbourhood once (both tap sets reach 2 samples; WIN_R covers that) and index it.
+            const WIN_R: usize = 4;
+            let (wx0, wy0) = (x0 as i32 - WIN_R as i32, sy0 as i32 - WIN_R as i32);
+            let (ww, wh) = (x1 - x0 + 2 * WIN_R, sy1 - sy0 + 2 * WIN_R);
+            win_c.clear();
+            win_l.clear();
+            for yy in 0..wh as i32 {
+                for xx in 0..ww as i32 {
+                    win_c.push(px(wx0 + xx, wy0 + yy));
+                    win_l.push(dsl(wx0 + xx, wy0 + yy));
+                }
+            }
+            let px = |x: i32, y: i32| -> i32 { win_c[(y - wy0) as usize * ww + (x - wx0) as usize] };
+            let dsl = |x: i32, y: i32| -> i32 { win_l[(y - wy0) as usize * ww + (x - wx0) as usize] };
             for y in sy0..sy1 {
                 for x in x0..x1 {
                     let m = px(x as i32, y as i32);
