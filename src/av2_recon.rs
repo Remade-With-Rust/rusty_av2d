@@ -3037,6 +3037,13 @@ fn opfl_pred_luma(
     bacp && have_bacp
 }
 
+thread_local! {
+    /// tip_pred_luma's two bilinear pre-MC windows (64-stride, up to 24 rows). put_bilin_win
+    /// writes the whole pw x pw window and every later read stays inside it, so the buffers are
+    /// reused: a fresh pair of zeroed vectors per 8x8 cell was ~4,400 instructions each.
+    static TIP_PREMC: std::cell::RefCell<[Vec<i32>; 2]> = const { std::cell::RefCell::new([Vec::new(), Vec::new()]) };
+}
+
 /// dav2d `tip_pred` (recon_tmpl.c:2059), luma: per-8x8 rp_proj TIP MVs; on the opfl path a
 /// bilinear pre-MC + integer DMVR (`sad_refine_mv`) + optical-flow delta (`opfl_derive_mv` /
 /// `opfl_mv_adj`); dual 1/16-pel windowed prep MC (`mc_opfl`); avg (or bacp-mask) blend.
@@ -3086,6 +3093,14 @@ fn tip_pred_luma(
     let stride = t.stride;
     let sad8x8_thr: u32 = if frame_mode == 1 { 6 } else { 15 };
     let rmv_base = ((by4 & 31) >> 1) * 16 + ((bx4 & 31) >> 1);
+    let mut p = TIP_PREMC.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    if opfl {
+        for b in p.iter_mut() {
+            if b.len() < 64 * 24 {
+                b.resize(64 * 24, 0);
+            }
+        }
+    }
     crate::av2_frame::REF_PICS.with(|rp| {
         let pics = rp.borrow();
         let refp = [
@@ -3139,7 +3154,6 @@ fn tip_pred_luma(
                 if opfl {
                     // bilinear pre-MC: (step+2)*4 square at 1/8-pel, mv - 32 (4px up-left)
                     let pw = (step + 2) * 4;
-                    let mut p = [vec![0i32; 64 * pw], vec![0i32; 64 * pw]];
                     for i in 0..2 {
                         put_bilin_win(planes[i], &mut p[i], 64, ((bx4 + x) * 4) as i32, ((by4 + y) * 4) as i32,
                                       pw, pw, cmv[i].y - 32, cmv[i].x - 32, wins[i]);
@@ -3235,6 +3249,7 @@ fn tip_pred_luma(
             y += step;
         }
     });
+    TIP_PREMC.with(|c| *c.borrow_mut() = p);
     if bacp && have_bacp {
         SEG_SCRATCH.with(|sc| {
             let scr = sc.borrow();
