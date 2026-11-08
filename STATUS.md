@@ -7,7 +7,7 @@
 ## What is verified
 
 Every clip in a **69-clip conformance corpus** decodes **byte-identical** to AOM's
-`avmdec`. The suite also runs 125 unit/integration tests. Both gate every change.
+`avmdec`. The suite also runs 128 unit/integration tests. Both gate every change.
 The nine 130-frame real-content streams from
 [issue #14](https://github.com/Remade-With-Rust/rusty_av2d/issues/14) also matched
 when that issue was fixed; they aren't vendored, so the gate doesn't rerun them.

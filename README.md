@@ -35,7 +35,7 @@ build is red.
 ## What "byte-identical" means here
 
 69 clips, each decoded and compared byte-for-byte against AOM's `avmdec`. Any
-mismatch fails the gate. Alongside them run 125 unit and integration tests. Both
+mismatch fails the gate. Alongside them run 128 unit and integration tests. Both
 must pass before any change lands.
 
 The corpus exercises:
