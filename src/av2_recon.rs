@@ -9401,7 +9401,9 @@ pub fn decode_luma_tx_level(
         let ey = e >> (2 + clw);
         let ex = e & ((4 << clw) - 1);
         let xy = ex + ey;
-        let (tw, th) = (bw4.min(8), bh4.min(8));
+        // avm get_lp2tx_ctx: the far-diagonal bound uses the TRANSFORM's size (64 capped to 32),
+        // not the frame-clipped extent; a 4x32 unit cut to 4x24 by the bottom edge still bounds at 32.
+        let (tw, th) = ((1usize << slw).min(8), (1usize << slh).min(8));
         let txtp_ctx = if xy < 2 {
             1
         } else if xy > 4 * (tw as i32 + th as i32) - 4 {
@@ -9796,7 +9798,9 @@ pub fn decode_b_luma(
                         let ey = e >> (2 + clw);
                         let ex = e & ((4 << clw) - 1);
                         let xy = ex + ey;
-                        let (tw, th) = (ubw4.min(8), ubh4.min(8));
+                        // avm get_lp2tx_ctx: the far-diagonal bound uses the TRANSFORM's size (64 capped to 32),
+                        // not the frame-clipped extent; a 4x32 unit cut to 4x24 by the bottom edge still bounds at 32.
+                        let (tw, th) = ((1usize << slw).min(8), (1usize << slh).min(8));
                         let txtp_ctx = if xy < 2 {
                             1
                         } else if xy > 4 * (tw as i32 + th as i32) - 4 {
