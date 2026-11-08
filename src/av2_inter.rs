@@ -610,8 +610,32 @@ pub struct OpflReg {
 pub fn opfl_derive_mv(
     p0: &[i32], s0: usize, p1: &[i32], s1: usize, w: usize, h: usize, bs: usize, d: (i32, i32),
 ) -> Vec<OpflReg> {
-    let mut tmp0 = [0i32; 64 * 16];
-    let mut tmp1 = [0i32; 64 * 16];
+    OPFL_SCRATCH.with_borrow_mut(|sc| opfl_derive_mv_in(p0, s0, p1, s1, w, h, bs, d, sc))
+}
+
+/// `opfl_derive_mv`'s four 64x16 intermediates.
+struct OpflScratch {
+    tmp0: [i32; 64 * 16],
+    tmp1: [i32; 64 * 16],
+    gx0: [i32; 64 * 16],
+    gy0: [i32; 64 * 16],
+}
+
+thread_local! {
+    /// Reused across calls: every sample read is written first in the same call (the tail past
+    /// an off-grid `w`/`h` is zeroed explicitly). Fresh zeroed arrays cost four 4 KB memsets
+    /// per call.
+    static OPFL_SCRATCH: std::cell::RefCell<OpflScratch> = const {
+        std::cell::RefCell::new(OpflScratch { tmp0: [0; 64 * 16], tmp1: [0; 64 * 16], gx0: [0; 64 * 16], gy0: [0; 64 * 16] })
+    };
+}
+
+#[allow(clippy::too_many_arguments)]
+fn opfl_derive_mv_in(
+    p0: &[i32], s0: usize, p1: &[i32], s1: usize, w: usize, h: usize, bs: usize, d: (i32, i32),
+    sc: &mut OpflScratch,
+) -> Vec<OpflReg> {
+    let OpflScratch { tmp0, tmp1, gx0, gy0 } = sc;
     // HARDENING: the fixed 64x16 scratch bounds the OPFL unit; a desynced stream can present a
     // larger nominal block — clamp instead of overrunning (valid units are <= 64x16).
     let (w, h) = (w.min(64), h.min(16));
@@ -635,8 +659,6 @@ pub fn opfl_derive_mv(
             }
         }
     }
-    let mut gx0 = [0i32; 64 * 16];
-    let mut gy0 = [0i32; 64 * 16];
     let mut bx = 0usize;
     while bx < w {
         if !crate::av2_recon::work_tick("av2_inter:548") { break; }
@@ -663,6 +685,17 @@ pub fn opfl_derive_mv(
             }
         }
         bx += 16;
+    }
+    if bs != 0 && (w % bs != 0 || h % bs != 0) {
+        // The regression below reads whole bs x bs cells, past an off-grid w x h: keep those
+        // reads at zero, as fresh buffers gave.
+        for buf in [&mut *gx0, &mut *gy0, &mut *tmp1] {
+            for (i, v) in buf.iter_mut().enumerate() {
+                if i / 64 >= h || i % 64 >= w {
+                    *v = 0;
+                }
+            }
+        }
     }
     let mut out = Vec::with_capacity(16);
     let mut y = 0usize;
