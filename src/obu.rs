@@ -1593,6 +1593,13 @@ fn parse_seq_hdr(
             return Err(Rav1dError::InvalidArgument);
         }
         let layout = [1u32, 0, 3, 2][layout_idx as usize];
+        // Monochrome needs the chroma tree, chroma prediction and the chroma filters skipped
+        // throughout (dav2d `c_root_bs = BS_INVALID`), which is not implemented. Refuse the stream
+        // rather than predict planes that do not exist.
+        if layout == 0 {
+            crate::dlog!("[rav2d AV2 seqhdr] monochrome (I400) is not implemented");
+            return Err(Rav1dError::UnsupportedBitstream);
+        }
         // Publish the chroma subsampling for the AV2 decode path (I400 keeps the 420 default —
         // its chroma planes are simply absent).
         crate::av2_frame::SS.with(|c| c.set(match layout {
