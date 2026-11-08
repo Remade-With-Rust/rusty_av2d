@@ -217,7 +217,7 @@ pub mod symtrace {
         if line.starts_with('S') {
             static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if crate::envflag::get("SYMBT").is_some_and(|v| v.parse() == Ok(n)) {
+            if crate::env_get!("SYMBT").is_some_and(|v| v.parse() == Ok(n)) {
                 eprintln!("[SYMBT] {n}: {line}{}", std::backtrace::Backtrace::force_capture());
             }
         }

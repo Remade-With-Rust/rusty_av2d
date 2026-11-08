@@ -147,7 +147,7 @@ fn warp_affine_inner(
             let dy = (mvy >> 16) as i32 - 4;
             let my = (((mvy as i32) & 0xffff) - abcd[2] as i32 * 4 - abcd[3] as i32 * 4) & !0x3f;
             warp8x8(rf, dst, dstw, x, y, dx, dy, abcd, mx, my, bdmax, prep);
-            if crate::envflag::is_set("MWARP2") && ss_hor == 0 && bx4 == 120 / 4 && by4 == 80 / 4 {
+            if crate::env_is_set!("MWARP2") && ss_hor == 0 && bx4 == 120 / 4 && by4 == 80 / 4 {
                 crate::dlog!("[MWARP2] sub=({x},{y}) dxy=({dx},{dy}) mxy=({mx},{my}) abcd={abcd:?} out0={} out57={}",
                     dst[y * dstw + x], dst[(y + 7) * dstw + x + 5]);
             }

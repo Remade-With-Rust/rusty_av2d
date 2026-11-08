@@ -353,7 +353,7 @@ pub fn add_film_grain(
                         >> gauss_sec_shift;
                 }
             }
-            if crate::envflag::is_set("AGRAIN") {
+            if crate::env_is_set!("AGRAIN") {
                 crate::dlog!("[MGRAIN] cb PRE row3: {:?} | coeffs: {:?}",
                     &cbgrain[3 * cg_stride + 3..3 * cg_stride + 13], &p.ar_coeffs[1][..13]);
             }
@@ -409,7 +409,7 @@ pub fn add_film_grain(
         }
     }
 
-    if crate::envflag::is_set("AGRAIN") {
+    if crate::env_is_set!("AGRAIN") {
         crate::dlog!("[MGRAIN] seed={seed} dims y={luma_block_size_x}x{luma_block_size_y} c={chroma_block_size_x}x{chroma_block_size_y} lgs={lg_stride} cgs={cg_stride}");
         crate::dlog!("[MGRAIN] lg row3: {:?}", &lgrain[3 * lg_stride + 3..3 * lg_stride + 13]);
         crate::dlog!("[MGRAIN] cb row3: {:?}", &cbgrain[3 * cg_stride + 3..3 * cg_stride + 13]);

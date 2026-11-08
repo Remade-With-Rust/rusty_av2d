@@ -38,7 +38,7 @@ pub fn simd_level() -> u32 {
     use std::sync::OnceLock;
     static LEVEL: OnceLock<u32> = OnceLock::new();
     *LEVEL.get_or_init(|| {
-        if crate::envflag::is_set("RUSTY_AV2D_NOSIMD") {
+        if crate::env_is_set!("RUSTY_AV2D_NOSIMD") {
             return 0;
         }
         #[cfg(target_arch = "x86_64")]
@@ -796,7 +796,7 @@ mod tests {
     /// scalar twin checked against itself and passes without testing anything.
     #[test]
     fn vector_arm_is_live_on_this_host() {
-        if crate::envflag::is_set("RUSTY_AV2D_NOSIMD") {
+        if crate::env_is_set!("RUSTY_AV2D_NOSIMD") {
             return;
         }
         #[cfg(target_arch = "x86_64")]

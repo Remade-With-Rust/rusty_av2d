@@ -417,7 +417,7 @@ pub fn lr_filter_chroma(
     if pd.r_type == REST_NONE {
         return;
     }
-    if crate::envflag::is_set("MLRU") {
+    if crate::env_is_set!("MLRU") {
         crate::dlog!("[MLRC] p={p} ds_type={ds_type} ffon={} ncls={} unit={} cw={cw} ch={ch}", pd.ffon as u8, pd.num_classes, 1usize << cfg.unit_size[1]);
     }
     let unit_sz_log2 = cfg.unit_size[1] as usize;
@@ -789,11 +789,11 @@ pub fn read_lr_units_sb(
         let lruh = 1usize.max((th - fy + half).min(sbh) >> usz_log2);
         for y in 0..lruh {
             for x in 0..lruw {
-                if crate::envflag::is_set("MLRU") {
+                if crate::env_is_set!("MLRU") {
                     crate::dlog!("[MLRUPRE] p={p} unit=({},{}) rng={} nscdf={}", fx + (x << usz_log2), fy + (y << usz_log2), msac.rng, cdf.m.rst_ns_wiener[0]);
                 }
                 let t = read_restoration_info(msac, cdf, p, frame_type);
-                if crate::envflag::is_set("MLRU") {
+                if crate::env_is_set!("MLRU") {
                     crate::dlog!("[MLRU] p={p} unit=({},{}) type={t} rng={}", fx + (x << usz_log2), fy + (y << usz_log2), msac.rng);
                 }
                 LR_UNITS.with(|u| {
@@ -801,7 +801,7 @@ pub fn read_lr_units_sb(
                 });
                 if t == REST_NS && !cfg.p[p].ffon {
                     let snap = NS_BANK.with(|b| b.borrow()[p].filter[4]);
-                    if p > 0 && crate::envflag::is_set("MLRU") {
+                    if p > 0 && crate::env_is_set!("MLRU") {
                         crate::dlog!("[MLRF] p={p} unit=({},{}) taps={:?}", fx + (x << usz_log2), fy + (y << usz_log2), &snap[0][..18]);
                     }
                     LR_UNIT_FILTERS.with(|u| {

@@ -31,7 +31,7 @@ impl Plane {
     #[track_caller]
     pub fn at(&self, x: usize, y: usize) -> i32 {
         let i = y * self.stride + x;
-        if i >= self.px.len() && crate::envflag::is_set("ATDBG") {
+        if i >= self.px.len() && crate::env_is_set!("ATDBG") {
             crate::dlog!("[ATDBG] Plane::at OOB x={x} y={y} w={} h={} len={} caller={}", self.w, self.h, self.px.len(), std::panic::Location::caller());
         }
         // HARDENING (root fix): every Plane::at caller in the recon/filter paths derives (x,y)
@@ -513,7 +513,7 @@ impl Frame {
         if self.cdb_lw.is_empty() {
             return;
         }
-        if crate::envflag::is_set("DBLK444")
+        if crate::env_is_set!("DBLK444")
             && (cbx4 * 4 <= 208 && (cbx4 + cbw4) * 4 >= 192 && cby4 * 4 <= 124 && (cby4 + cbh4) * 4 >= 112)
         {
             crate::dlog!("[MMARK] c=({},{}) w={} h={}", cbx4 * 4, cby4 * 4, cbw4 * 4, cbh4 * 4);
@@ -1023,7 +1023,7 @@ thread_local! {
 /// (REF_F2RECON) and print the first mismatch — in DECODE order — so the true cascade ROOT
 /// (earliest wrong block, any type) is visible. `tag` labels the block type.
 pub fn dbg_block_miss(bx4: usize, by4: usize, bw4: usize, bh4: usize, tag: &str) {
-    if !crate::envflag::is_set("RECONDBG") {
+    if !crate::env_is_set!("RECONDBG") {
         return;
     }
     REF_F2RECON.with(|r| {
@@ -1055,7 +1055,7 @@ pub fn dbg_block_miss(bx4: usize, by4: usize, bw4: usize, bh4: usize, tag: &str)
 /// `px0,py0`, size `w×h`) to dav's frame-2 chroma recon (`REF_F2RECONC`) and print the FIRST
 /// mismatching pixel — the causal root, since it fires in decode order before any cascade.
 pub fn dbg_block_miss_c(px0: usize, py0: usize, w: usize, h: usize, tag: &str) {
-    if !crate::envflag::is_set("CRECONDBG") {
+    if !crate::env_is_set!("CRECONDBG") {
         return;
     }
     REF_F2RECONC.with(|r| {
@@ -1736,7 +1736,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         });
         let _ = std::fs::write(format!("{prefix}_{n}.yuv"), &out);
     }
-    if crate::envflag::is_set("MDBGRID") {
+    if crate::env_is_set!("MDBGRID") {
         let dc = DEBLOCK_CFG.with(|c| c.get());
         crate::dlog!("[MDBCFG] y0={} y1={} u={} v={} sub_pu={} dqy0={} dqy1={} dqu={} dqv={}",
             dc.level_y0 as u8, dc.level_y1 as u8, dc.level_u as u8, dc.level_v as u8,
@@ -1798,11 +1798,11 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         let mut f = std::fs::File::create(path).unwrap();
         for v in pl0.iter() { f.write_all(&(*v as u16).to_le_bytes()).unwrap(); }
     }
-    if crate::envflag::is_set("MDBW") {
+    if crate::env_is_set!("MDBW") {
         crate::av2_deblock::QMAP.with(|w| *w.borrow_mut() = vec![-1i16; 6 * 6480]);
     }
     let mut dcfg = DEBLOCK_CFG.with(|c| c.get());
-    if crate::envflag::is_set("NODEBLOCK") {
+    if crate::env_is_set!("NODEBLOCK") {
         dcfg.level_y0 = false;
         dcfg.level_y1 = false;
         dcfg.level_u = false;
@@ -1854,7 +1854,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             (deblock_quant_thr(q + 8 * dcfg.dq_y0, hbd), deblock_side_thr(q + 8 * dcfg.dq_y0, hbd),
              deblock_quant_thr(q + 8 * dcfg.dq_y1, hbd), deblock_side_thr(q + 8 * dcfg.dq_y1, hbd))
         }).collect();
-        if crate::envflag::is_set("DQGRID") {
+        if crate::env_is_set!("DQGRID") {
             crate::dlog!("[DQGRID] w={sbq_w} len={} grid={:?}", sbq_grid.len(), &sbq_grid[..sbq_grid.len().min(28)]);
             crate::dlog!("[DQGRID] ythr[0..8]={:?}", &ythr[..ythr.len().min(8)]);
         }
@@ -1870,7 +1870,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             (a, b, a, b)
         }).collect();
         let sbt = if uthr.is_empty() { None } else { Some((uthr.as_slice(), sbq_w, ss_h_c, ss_v_c)) };
-        crate::av2_deblock::DBG_TAG.with(|c| c.set(crate::envflag::is_set("DBLK444")));
+        crate::av2_deblock::DBG_TAG.with(|c| c.set(crate::env_is_set!("DBLK444")));
         deblock_plane(&mut pl1, ciw4, cih4, cw, &cdb_lw, &cdb_lh, &cdb_left, &cdb_top, q, s, q, s, sbt, &cdb_spv, &cdb_sph, bdmax, &MAX_WIDTH_UV_TBL, 16 >> SS.with(|c| c.get()).1, 2, true, true, &tile_v_c);
         crate::av2_deblock::DBG_TAG.with(|c| c.set(false));
     }
@@ -1893,7 +1893,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     }
     // Debug: replace mine's post-deblock with dav's (same-run) so CDEF/CCSO/GDF are tested on
     // perfect input, removing any deblock cascade. Isolates cdef/ccso/gdf param bugs.
-    if crate::envflag::is_set("FORCE_PD") {
+    if crate::env_is_set!("FORCE_PD") {
         if let Ok(o) = std::fs::read(&crate::av2_recon::cap_path("dav_f2postdeblk.yuv")) {
             for i in 0..(w * h) { pl0[i] = o[i] as i32; }
             for i in 0..(cw * ch) { pl1[i] = o[w * h + i] as i32; pl2[i] = o[w * h + cw * ch + i] as i32; }
@@ -1908,7 +1908,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     let deblk_v = pl2.clone();
 
     // env OH1PD: dump the POST-DEBLOCK planes for the oh=1 frame (filter-stage A/B vs dav PD1).
-    if crate::envflag::is_set("MDBW") {
+    if crate::env_is_set!("MDBW") {
         let oh = crate::av2_recon::CUR_FRAME_REF.with(|c| c.get().0);
         dump_frame2_luma_wmap(&(crate::av2_recon::cap_path(&format!("mine_oh{oh}_wmap.bin"))));
         crate::av2_deblock::QMAP.with(|w| {
@@ -1921,7 +1921,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             }
         });
     }
-    if crate::envflag::is_set("OH1PD") {
+    if crate::env_is_set!("OH1PD") {
         let mut out = Vec::new();
         for y in 0..h {
             if !crate::av2_recon::work_tick("frm:1716") { break; }
@@ -1950,7 +1950,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         let f = fr.borrow();
         (f.cdef_idx.clone(), f.cdef_sbw, f.noskip.clone())
     });
-    if ccfg.enabled && !cdef_idx.is_empty() && !crate::envflag::is_set("NOCDEF") {
+    if ccfg.enabled && !cdef_idx.is_empty() && !crate::env_is_set!("NOCDEF") {
         // Levels and damping scale with bitdepth (dav2d cdef_apply_tmpl.c:106-111, 280-288).
         let bd_min8 = (bdmax + 1).trailing_zeros() as i32 - 8;
         let damping = ccfg.damping + bd_min8;
@@ -2020,7 +2020,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         }
     }
 
-    if crate::envflag::is_set("CFGDBG") {
+    if crate::env_is_set!("CFGDBG") {
         crate::dlog!("[MINECFG] cdef damping={} n_str={} on_skiptx={} y_str={:?} uv_str={:?}", ccfg.damping, ccfg.n_strengths, ccfg.on_skiptx, &ccfg.y_strength[..ccfg.n_strengths], &ccfg.uv_strength[..ccfg.n_strengths]);
         FRAME.with(|fr| {
             let f = fr.borrow();
@@ -2062,7 +2062,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     // Write the MERGED map back so this frame's slot save carries the complete flags (a later
     // frame's sb_reuse chain — e.g. key → reshow → P — reads them from the slot).
     FRAME.with(|fr| fr.borrow_mut().ccso_blk = ccso_blk.clone());
-    if crate::envflag::is_set("CFGDBG") {
+    if crate::env_is_set!("CFGDBG") {
         for pl in 0..3 {
             let p = &sccfg.p[pl];
             let on_sbs = (0..ccso_n256).filter(|&b| ccso_blk.get(pl * ccso_n256 + b).copied().unwrap_or(false)).count();
@@ -2071,7 +2071,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             crate::dlog!("[MINECFG] ccso pl={pl} en={} bo_only={} mbl2={} ON_SBS={on_sbs}/{ccso_n256} band_off={bands:?}", p.enabled, p.bo_only, p.max_band_log2);
         }
     }
-    if sccfg.enabled && !crate::envflag::is_set("NOCCSO") {
+    if sccfg.enabled && !crate::env_is_set!("NOCCSO") {
         let (hi, wi) = (h as i32, w as i32);
         let cl = |v: i32, m: i32| v.clamp(0, m - 1);
         for pl in 0..3usize {
@@ -2118,7 +2118,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
                     let lut = ((band as usize) << 4) | ((cls0 as usize) << 2) | (cls1 as usize);
                     let offset = pc.filter_offset.get(lut).copied().unwrap_or(0) as i32;
                     let idx = py * pw + px;
-                    if crate::envflag::is_set("CCSODBG") && pl == 0 && py == 0 && (px == 338 || px == 167) {
+                    if crate::env_is_set!("CCSODBG") && pl == 0 && py == 0 && (px == 338 || px == 167) {
                         crate::dlog!("[MCCSOA] px={px} src={center} band={band} cls={cls0},{cls1} off={offset} dst_in={} thr={q} shift={shift} bo={} eclf={} ext={}", out[idx], pc.bo_only as u8, pc.edge_clf as u8, pc.ext_filter);
                     }
                     out[idx] = (out[idx] + offset).clamp(0, bdmax);
@@ -2137,7 +2137,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     // (post-CCSO) snapshot with post-deblock stripe-boundary rows; GDF's guided input
     // stays PRE-wiener (dav lr_stripe: gdf_prep before wiener, gdf_add after). ----
     let mut lr_src: Option<Vec<i32>> = None;
-    if crate::av2_lr::LR_CFG.with(|c| c.borrow().enabled()) && !crate::envflag::is_set("NOLR") {
+    if crate::av2_lr::LR_CFG.with(|c| c.borrow().enabled()) && !crate::env_is_set!("NOLR") {
         let (lr_noskip, f_iw4) = FRAME.with(|fr| {
             let f = fr.borrow();
             (f.lr_noskip.clone(), f.iw4)
@@ -2163,7 +2163,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         lr_src = Some(src);
     }
     // ---- 4. GDF (luma only: PRE-wiener guided input, post-deblock reference) ----
-    let gcfg = if crate::envflag::is_set("NOGDF") { GdfCfg { enabled: false, ..GDF_CFG.with(|c| c.get()) } } else { GDF_CFG.with(|c| c.get()) };
+    let gcfg = if crate::env_is_set!("NOGDF") { GdfCfg { enabled: false, ..GDF_CFG.with(|c| c.get()) } } else { GDF_CFG.with(|c| c.get()) };
     let gdf_blk = FRAME.with(|fr| fr.borrow().gdf_blk.clone());
     if gcfg.enabled {
         let mut out = pl0.clone();
@@ -2175,7 +2175,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     }
 
     // MFIN: per-decode-frame FINAL dump (mirrors dav DFINDUMP — covers hidden frames).
-    if crate::envflag::is_set("MFIN") && !tip_output {
+    if crate::env_is_set!("MFIN") && !tip_output {
         thread_local! { static FIN_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
         let n = FIN_N.with(|c| { let v = c.get(); c.set(v + 1); v });
         let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
