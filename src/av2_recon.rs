@@ -589,7 +589,8 @@ thread_local! {
     /// A corrupt stream can otherwise spin a step-loop forever (fuzz HANG class). The budget is
     /// generous vs. real work (a 512x512 frame is ~16k 4px blocks; each does bounded per-block
     /// work), so no valid stream can reach it — it is a safety net, not a policy.
-    pub static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Ticks LEFT in this frame's budget: `work_reset` sets it to the cap, each tick takes one.
+    pub static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(WORK_CAP_DEFAULT) };
     pub static WORK_TRIPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
     /// The current frame is an S_FRAME (frame_type==3). Consumed by update_ref_slots so the
@@ -953,29 +954,43 @@ macro_rules! dlog {
     ($($arg:tt)*) => { if $crate::av2_recon::dbg_on() { eprintln!($($arg)*); } };
 }
 
+/// The default per-frame work budget: ~64M ticks, orders of magnitude above any legal frame's
+/// walker iterations.
+const WORK_CAP_DEFAULT: u64 = 64_000_000;
+
+/// The per-frame work budget. WORKBUDGET=<n> overrides it (diagnostics: set it low to prove the
+/// budget is live and to name whichever walker a corrupt stream is spinning in).
+fn work_cap() -> u64 {
+    static CAP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("WORKBUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(WORK_CAP_DEFAULT)
+    })
+}
+
 /// Per-frame work budget: reset at frame start.
 pub fn work_reset() {
-    WORK.with(|c| c.set(0));
+    WORK.with(|c| c.set(work_cap()));
     WORK_TRIPPED.with(|c| c.set(false));
 }
 
 /// Tick the work budget. Returns false once the frame's budget is exhausted — callers must
 /// then stop iterating (a corrupt stream is spinning). Logs once, on the site that tripped it.
+///
+/// The tick sits on the hottest inner loops, so it is a thread-local decrement and a test: the
+/// cap is read once per frame by `work_reset`, not once per tick.
 #[inline]
 pub fn work_tick(site: &str) -> bool {
-    let n = WORK.with(|c| { let v = c.get() + 1; c.set(v); v });
-    // ~64M ticks: orders of magnitude above any legal frame's walker iterations.
-    // WORKBUDGET=<n> overrides it (diagnostics: set it low to prove the budget is live and
-    // to name whichever walker a corrupt stream is spinning in).
-    // The cap is read ONCE (an env lookup per tick was a severe slowdown — the tick is on
-    // the hottest inner loops).
-    static CAP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    let cap = *CAP.get_or_init(|| {
-        std::env::var("WORKBUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(64_000_000)
-    });
-    if n <= cap {
+    let left = WORK.with(|c| c.get());
+    if left != 0 {
+        WORK.with(|c| c.set(left - 1));
         return true;
     }
+    work_exhausted(site)
+}
+
+#[cold]
+#[inline(never)]
+fn work_exhausted(site: &str) -> bool {
     if !WORK_TRIPPED.with(|c| c.replace(true)) {
         crate::dlog!("[rav2d AV2] work budget exhausted at `{site}` — corrupt stream, aborting frame");
     }
