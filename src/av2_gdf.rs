@@ -279,11 +279,12 @@ fn inference(
     let mut lap_row = 0usize; // in u32 units, advances by lap_y_stride per 2 output rows
     let mut cls_col_row = 0usize; // cls advances by cls_stride per 2 output rows
     let _ = lap_cls_height;
+    // gdf_idx[j][idx]: one accumulator row, cleared per output row.
+    let mut gdf_idx = vec![[0i32; LUT_IDX_NUM]; blk_width];
     for i in 0..blk_height {
         if !crate::av2_recon::work_tick("gdf:275") { break; }
         let rec_ptr = recbase as isize + (i as isize) * s;
-        // gdf_idx[j][idx]
-        let mut gdf_idx = vec![[0i32; LUT_IDX_NUM]; blk_width];
+        gdf_idx.fill([0; LUT_IDX_NUM]);
         for k in 0..INP_TOT {
             let (fy, fx, by, bx) = if k < INP_REC_NUM {
                 (FWD[k][0], FWD[k][1], BWD[k][0], BWD[k][1])
@@ -309,8 +310,8 @@ fn inference(
                     gdf_inp += clip(inp2, -a, a);
                 }
                 gdf_inp = clip(gdf_inp, -(1 << (GDF_TEST_INP_PREC - 1)), (1 << (GDF_TEST_INP_PREC - 1)) - 1);
+                // A constant trip count: the row loop's tick bounds this walk.
                 for idx in 0..LUT_IDX_NUM {
-                    if !crate::av2_recon::work_tick("gdf:304") { break; }
                     let w = weight[cls_offset + (INP_TOT * CLS_NUM) * idx] as i32;
                     gdf_idx[j][idx] += gdf_inp * w;
                 }
