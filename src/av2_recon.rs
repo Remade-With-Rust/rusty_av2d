@@ -2577,7 +2577,7 @@ pub fn decode_chroma_mode(
             (DEFAULT_MODE_LIST_UV[i.min(7)], 0)
         }
     };
-    let (cbw4m, cbh4m) = ((bd[0] as usize >> 1).max(1), (bd[1] as usize >> 1).max(1));
+    let (cbw4m, cbh4m) = ((bd[0] as usize >> ssh).max(1), (bd[1] as usize >> ssv).max(1));
     cnb.a_uvmode[cbx4..cbx4 + cbw4m].fill(uv_mode);
     cnb.l_uvmode[cby4..cby4 + cbh4m].fill(uv_mode);
     ChromaMode { uv_mode, uv_angle, cfl_mode, cfl_alpha_u, cfl_alpha_v, mh_dir }
@@ -3818,11 +3818,6 @@ fn bawp_morph(pred: &mut [i32], bx4: usize, by4: usize, bw4: usize, bh4: usize, 
         }
         alpha
     }
-    // n_edge_samples[have_above && have_left][lh4][lw4][above, left] (recon_tmpl.c:2789).
-    const NES: [[[[u8; 2]; 3]; 3]; 2] = [
-        [[[2, 2], [3, 2], [4, 2]], [[2, 3], [3, 3], [4, 3]], [[2, 4], [3, 4], [4, 4]]],
-        [[[2, 2], [2, 2], [4, 0]], [[2, 2], [3, 3], [3, 3]], [[0, 4], [3, 3], [4, 4]]],
-    ];
     let (w, h) = (bw4 * 4, bh4 * 4);
     // BAWP template availability is TILE-relative (dav recon_tmpl.c:2839 `bx > tiling.col_start`).
     let tbawp = TILE_B.with(|t| t.get());
@@ -3845,12 +3840,40 @@ fn bawp_morph(pred: &mut [i32], bx4: usize, by4: usize, bw4: usize, bh4: usize, 
     if !(ref_y + sb_h4 * 4 <= fh && ref_x + sb_w4 * 4 <= fw && ref_y - 1 >= 0 && ref_x - 1 >= 0) {
         return 256;
     }
-    let lw4 = (ulog2(bw4 as u32).min(2)) as usize;
-    let lh4 = (ulog2(bh4 as u32).min(2)) as usize;
-    let idx = (have_above && have_left) as usize;
-    let n_above = if have_above { NES[idx][lh4][lw4][0] as i32 } else { 0 };
-    let n_left = if have_left { NES[idx][lh4][lw4][1] as i32 } else { 0 };
-    let count_l2 = n_above + if n_above == n_left { (n_above != 0) as i32 } else { n_left };
+    // avm derive_bawp_parameters, luma: each side uses the block's IN-FRAME extent (`ref_w`/`ref_h`)
+    // capped at 16 samples, padded up to a power of two by repeating from its start, and sampled
+    // every `step`. A block past the bottom or right edge must not read rows or columns beyond the
+    // coded area.
+    const LOG2_BAWP: [usize; 17] = [0, 0, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4];
+    const LOG_TO_SIZE: [usize; 5] = [0, 2, 4, 8, 16];
+    let bw = ((sb_w4 * 4).max(0) as usize).min(16);
+    let bh = ((sb_h4 * 4).max(0) as usize).min(16);
+    let width = LOG_TO_SIZE[LOG2_BAWP[bw]];
+    let height = LOG_TO_SIZE[LOG2_BAWP[bh]];
+    let (above_ok, left_ok) = (have_above && width != 0, have_left && height != 0);
+    // derive_number_ref_samples_bawp
+    let (numb_up, numb_left) = if above_ok && left_ok {
+        if width == 16 && height == 16 {
+            (16, 16)
+        } else if width > 4 && height > 4 {
+            (8, 8)
+        } else if width < 16 && height < 16 {
+            (4, 4)
+        } else if width == 16 {
+            (16, 0)
+        } else {
+            (0, 16)
+        }
+    } else if above_ok {
+        (width, 0)
+    } else if left_ok {
+        (0, height)
+    } else {
+        (0, 0)
+    };
+    let count = numb_up + numb_left;
+    // Every reachable count is a power of two (or zero).
+    let count_l2 = if count == 0 { 0 } else { count.trailing_zeros() as i32 };
     let (mut sx, mut sy, mut sxy, mut sx2) = (0i64, 0i64, 0i64, 0i64);
     crate::av2_frame::FRAME.with(|fr| {
         crate::av2_frame::REF_FRAME1.with(|rf| {
@@ -3866,28 +3889,24 @@ fn bawp_morph(pred: &mut [i32], bx4: usize, by4: usize, bw4: usize, bh4: usize, 
                 f.pl[0].px.get(y.max(0) as usize * fstride + x.max(0) as usize).copied().unwrap_or(0) as i64
             };
             let getr = |x: i32, y: i32| -> i64 { rp.at(x as usize, y as usize) as i64 };
-            if n_above != 0 {
-                let bw = 4i32 << lw4;
-                let step = bw >> n_above;
-                let mut i = step >> 1;
-                while i < bw {
-                    if !crate::av2_recon::work_tick("av2_recon:3594") { break; }
-                    let (x, y) = (getr(ref_x + i, ref_y - 1), getf(bx4 as i32 * 4 + i, by4 as i32 * 4 - 1));
-                    sx += x; sy += y; sxy += x * y; sx2 += x * x;
+            let (cx, cy) = (bx4 as i32 * 4, by4 as i32 * 4);
+            let mut side = |n: usize, len: usize, pad: usize, at: &dyn Fn(i32) -> (i64, i64)| {
+                if n == 0 {
+                    return;
+                }
+                let step = pad / n;
+                let mut i = if step == 1 { 0 } else { step >> 1 };
+                while i < pad {
+                    let (x, y) = at((i % len) as i32);
+                    sx += x;
+                    sy += y;
+                    sxy += x * y;
+                    sx2 += x * x;
                     i += step;
                 }
-            }
-            if n_left != 0 {
-                let bh = 4i32 << lh4;
-                let step = bh >> n_left;
-                let mut i = step >> 1;
-                while i < bh {
-                    if !crate::av2_recon::work_tick("av2_recon:3604") { break; }
-                    let (x, y) = (getr(ref_x - 1, ref_y + i), getf(bx4 as i32 * 4 - 1, by4 as i32 * 4 + i));
-                    sx += x; sy += y; sxy += x * y; sx2 += x * x;
-                    i += step;
-                }
-            }
+            };
+            side(numb_up, bw, width, &|i| (getr(ref_x + i, ref_y - 1), getf(cx + i, cy - 1)));
+            side(numb_left, bh, height, &|i| (getr(ref_x - 1, ref_y + i), getf(cx - 1, cy + i)));
         })
     });
     let (sx, sy, sxy, sx2) = (sx as i32, sy as i32, sxy as i32, sx2 as i32);
@@ -7567,8 +7586,13 @@ fn recon_intra_chroma(
                     if yl.w != 0 {
                         let (mut pu, mut pv) = (vec![0i32; w * h], vec![0i32; w * h]);
                         if cfl_mode == 3 {
+                            // avm mhccp_implicit_fetch_neighbor_luma: the top-right (bottom-left)
+                            // samples join the model only when the LUMA transform is wider (taller)
+                            // than 4. Always true in 4:2:0; a 4-wide 4:4:4 block takes none.
+                            let mh_tr = if (w << ssh_a) > 4 { n_tr >> 2 } else { 0 };
+                            let mh_bl = if (h << ssv_a) > 4 { n_bl >> 2 } else { 0 };
                             recon_mhccp(yl, cu, cv, px0, py0, w, h, have_top, have_left,
-                                is_top_sb, mh_dir, n_tr >> 2, n_bl >> 2, bdmax, &mut pu, &mut pv);
+                                is_top_sb, mh_dir, mh_tr, mh_bl, bdmax, &mut pu, &mut pv);
                         } else {
                             recon_cfl(yl, cu, cv, px0, py0, by4, w, h, have_top, have_left,
                                 cfl_mode == 2, cfl_alpha_u, cfl_alpha_v, ds, bdmax, &mut pu, &mut pv);
