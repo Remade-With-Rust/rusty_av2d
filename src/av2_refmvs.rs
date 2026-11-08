@@ -1742,7 +1742,6 @@ pub fn load_tmvs(row_start8: i32, row_end8: i32) {
                 for r in 0..2usize {
                     if !crate::av2_recon::work_tick("refmvs:1705") { break; }
                     for x in col_start8 as usize..(col_end8 as usize).min(stride as usize) {
-                        if !crate::av2_recon::work_tick("refmvs:1706") { break; }
                         // HARDENING: corrupt dims vs the projection window
                         let (di, si) = (r * stride as usize + x, base + ((sbsz8 as usize - 2 + r) * stride as usize) + x);
                         if di >= proj.len() || si >= proj.len() { continue; }
@@ -1763,7 +1762,6 @@ pub fn load_tmvs(row_start8: i32, row_end8: i32) {
                     for n in 0..7usize {
                         if !crate::av2_recon::work_tick("refmvs:1722") { break; }
                         for y in row_start8..row_end8 {
-                            if !crate::av2_recon::work_tick("refmvs:1723") { break; }
                             let py = ((y & (sbsz8 - 1)) * stride) as usize;
                             for x in col_start8 as usize..col_end8 as usize {
                                 if !crate::av2_recon::work_tick("refmvs:1725") { break; }
@@ -1808,7 +1806,6 @@ pub fn load_tmvs(row_start8: i32, row_end8: i32) {
                         for y in (row_start8..row_end8).step_by(step as usize) {
                             if !crate::av2_recon::work_tick("refmvs:1760") { break; }
                             for x in (col_start8i..col_end8i).step_by(step as usize) {
-                                if !crate::av2_recon::work_tick("refmvs:1761") { break; }
                                 // saved field cell (whole-frame layout)
                                 if y >= field.h8 as i32 || x >= field.w8 as i32 {
                                     continue;
@@ -2176,7 +2173,6 @@ pub fn tmvs_dump(row_start8: i32, row_end8: i32) {
             for y in row_start8..row_end8 {
                 if !crate::av2_recon::work_tick("refmvs:2084") { break; }
                 for x in 0..t.iw8 {
-                    if !crate::av2_recon::work_tick("refmvs:2085") { break; }
                     let pp = ((y & 7) as usize) * stride + x as usize;
                     let (m, r) = proj[2 * stride + pp];
                     crate::dlog!("[TPROJ] y={y} x={x} mv={},{} ref={r}", if m.y == INVALID_MV_I32 { -32768 } else { m.y }, m.x);
@@ -2700,7 +2696,6 @@ impl RefmvsGrid {
         for r in 0..bh4 {
             if !crate::av2_recon::work_tick("refmvs:2593") { break; }
             for c in 0..bw4 {
-                if !crate::av2_recon::work_tick("refmvs:2594") { break; }
                 let cell = &mut self.r[(by4 + r).min(crate::av2_recon::nb_len() - 1) * crate::av2_recon::nb_len() + (bx4 + c).min(crate::av2_recon::nb_len() - 1)];
                 *cell = RefmvsBlock { bs, bx4: bx4 as u16, by4: by4 as u16, ..RefmvsBlock::default() };
             }
@@ -2714,7 +2709,6 @@ impl RefmvsGrid {
         for r in 0..bh4 {
             if !crate::av2_recon::work_tick("refmvs:2605") { break; }
             for c in 0..bw4 {
-                if !crate::av2_recon::work_tick("refmvs:2606") { break; }
                 let cell = &mut self.r[(by4 + r).min(crate::av2_recon::nb_len() - 1) * crate::av2_recon::nb_len() + (bx4 + c).min(crate::av2_recon::nb_len() - 1)];
                 *cell = RefmvsBlock {
                     mv: [bv, Mv { y: -0x8000, x: -0x8000 }],
@@ -2743,7 +2737,6 @@ impl RefmvsGrid {
         for r in 0..bh4 {
             if !crate::av2_recon::work_tick("refmvs:2632") { break; }
             for c in 0..bw4 {
-                if !crate::av2_recon::work_tick("refmvs:2633") { break; }
                 let mv = if mf & 2 != 0 {
                     warp_cell_mv(&matrix, bx4 as i32, by4 as i32, (c as i32) & !1, (r as i32) & !1)
                 } else {

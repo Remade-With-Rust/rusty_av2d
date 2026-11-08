@@ -73,7 +73,6 @@ fn subsample_420(src: &[u8], w8: usize, h8: usize) -> Vec<u8> {
     for y in 0..h8 * 4 {
         if !crate::av2_recon::work_tick("wedge:70") { break; }
         for x in 0..hw {
-            if !crate::av2_recon::work_tick("wedge:71") { break; }
             let s = (y * 2) * w + x * 2;
             dst[y * hw + x] =
                 ((src[s] as u32 + src[s + 1] as u32 + src[s + w] as u32 + src[s + w + 1] as u32 + 2) >> 2) as u8;
@@ -88,7 +87,6 @@ fn subsample_422(src: &[u8], w8: usize, h8: usize) -> Vec<u8> {
     for y in 0..h8 * 8 {
         if !crate::av2_recon::work_tick("wedge:83") { break; }
         for x in 0..hw {
-            if !crate::av2_recon::work_tick("wedge:84") { break; }
             let s = y * w + x * 2;
             dst[y * hw + x] = ((src[s] as u32 + src[s + 1] as u32 + 1) >> 1) as u8;
         }
@@ -101,12 +99,10 @@ fn fill_tmvp(src: &[u8], w8: usize, h8: usize) -> Vec<u8> {
     for y in 0..h8 {
         if !crate::av2_recon::work_tick("wedge:94") { break; }
         for x in 0..w8 {
-            if !crate::av2_recon::work_tick("wedge:95") { break; }
             let (mut s0, mut s1) = (0u32, 0u32);
             for yy in y * 8..y * 8 + 8 {
                 if !crate::av2_recon::work_tick("wedge:97") { break; }
                 for xx in x * 8..x * 8 + 8 {
-                    if !crate::av2_recon::work_tick("wedge:98") { break; }
                     let v = src[yy * w8 * 8 + xx];
                     s0 += (v < 4) as u32;
                     s1 += (v > 60) as u32;

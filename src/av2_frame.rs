@@ -194,7 +194,6 @@ impl Frame {
         for r in sr..(sr + bh4).min(st) {
             if !crate::av2_recon::work_tick("frm:170") { break; }
             for c in sc..(sc + bw4).min(st) {
-                if !crate::av2_recon::work_tick("frm:171") { break; }
                 self.mi_coded_c[r * 32 + c] = true;
             }
         }
@@ -217,7 +216,6 @@ impl Frame {
         for r in sr..(sr + bh4).min(st) {
             if !crate::av2_recon::work_tick("frm:191") { break; }
             for c in sc..(sc + bw4).min(st) {
-                if !crate::av2_recon::work_tick("frm:192") { break; }
                 self.mi_coded[r * 32 + c] = true;
             }
         }
@@ -228,14 +226,12 @@ impl Frame {
         for r in sr..(sr + bh4).min(st) {
             if !crate::av2_recon::work_tick("frm:200") { break; }
             for c in sc..(sc + bw4).min(st) {
-                if !crate::av2_recon::work_tick("frm:201") { break; }
                 self.mi_coded[r * 32 + c] = true;
             }
         }
         for r in by4..(by4 + bh4).min(self.ih4) {
             if !crate::av2_recon::work_tick("frm:205") { break; }
             for c in bx4..(bx4 + bw4).min(self.iw4) {
-                if !crate::av2_recon::work_tick("frm:206") { break; }
                 self.joint[r * self.iw4 + c] = joint;
             }
         }
@@ -253,7 +249,6 @@ impl Frame {
         for r in by4..(by4 + bh4).min(ih4) {
             if !crate::av2_recon::work_tick("frm:221") { break; }
             for c in bx4..(bx4 + bw4).min(iw4) {
-                if !crate::av2_recon::work_tick("frm:222") { break; }
                 let cell = r * iw4 + c;
                 self.db_lw[cell] = lw;
                 self.db_lh[cell] = lh;
@@ -272,7 +267,6 @@ impl Frame {
         for r in by4..(by4 + bh4).min(ih4) {
             if !crate::av2_recon::work_tick("frm:238") { break; }
             for c in bx4..(bx4 + bw4).min(iw4) {
-                if !crate::av2_recon::work_tick("frm:239") { break; }
                 let cell = r * iw4 + c;
                 self.db_lw[cell] = lw;
                 self.db_lh[cell] = lh;
@@ -297,7 +291,6 @@ impl Frame {
         for r in by4..(by4 + bh4).min(ih4) {
             if !crate::av2_recon::work_tick("frm:261") { break; }
             for c in bx4..(bx4 + bw4).min(iw4) {
-                if !crate::av2_recon::work_tick("frm:262") { break; }
                 let cell = r * iw4 + c;
                 self.db_lw[cell] = self.db_lw[cell].min(sl);
                 self.db_lh[cell] = self.db_lh[cell].min(sl);
@@ -352,7 +345,6 @@ impl Frame {
         for r in cby4..(cby4 + cbh4).min(ih4) {
             if !crate::av2_recon::work_tick("frm:312") { break; }
             for c in cbx4..(cbx4 + cbw4).min(iw4) {
-                if !crate::av2_recon::work_tick("frm:313") { break; }
                 let cell = r * iw4 + c;
                 self.cdb_lw[cell] = self.cdb_lw[cell].min(lw_cap);
                 self.cdb_lh[cell] = self.cdb_lh[cell].min(lh_cap);
@@ -423,7 +415,6 @@ impl Frame {
         for dy in 0..n64 {
             if !crate::av2_recon::work_tick("frm:379") { break; }
             for dx in 0..n64 {
-                if !crate::av2_recon::work_tick("frm:380") { break; }
                 let (cx, cy) = ((bx4 >> 4) + dx, (by4 >> 4) + dy);
                 if cx < self.cdef_sbw && cy < rows {
                     self.sb_qidx[cy * self.cdef_sbw + cx] = q;
@@ -453,7 +444,6 @@ impl Frame {
         for r in by4..(by4 + bh4).min(self.ih4) {
             if !crate::av2_recon::work_tick("frm:407") { break; }
             for c in bx4..(bx4 + bw4).min(self.iw4) {
-                if !crate::av2_recon::work_tick("frm:408") { break; }
                 self.lr_noskip[r * self.iw4 + c] = true;
             }
         }
@@ -525,7 +515,6 @@ impl Frame {
         for r in cby4..(cby4 + cbh4).min(cih4) {
             if !crate::av2_recon::work_tick("frm:476") { break; }
             for c in cbx4..(cbx4 + cbw4).min(ciw4) {
-                if !crate::av2_recon::work_tick("frm:477") { break; }
                 let cell = r * ciw4 + c;
                 self.cdb_lw[cell] = lw;
                 self.cdb_lh[cell] = lh;
@@ -749,7 +738,6 @@ pub fn stash_decoded_frame1() {
                     for y in 0..p.h {
                         if !crate::av2_recon::work_tick("frm:683") { break; }
                         for x in 0..p.w {
-                            if !crate::av2_recon::work_tick("frm:684") { break; }
                             let v = p.px[y * p.stride + x];
                             if hbd {
                                 let _ = fp.write_all(&(v as u16).to_le_bytes());
@@ -1039,7 +1027,6 @@ pub fn dbg_block_miss(bx4: usize, by4: usize, bw4: usize, bh4: usize, tag: &str)
                 for yy in 0..h {
                     if !crate::av2_recon::work_tick("frm:952") { break; }
                     for xx in 0..w {
-                        if !crate::av2_recon::work_tick("frm:953") { break; }
                         let (px, py) = (bx4 * 4 + xx, by4 * 4 + yy);
                         if px < rp.w && py < rp.h {
                             let m = f.pl[0].px[py * f.pl[0].stride + px] as i32;
@@ -1072,7 +1059,6 @@ pub fn dbg_block_miss_c(px0: usize, py0: usize, w: usize, h: usize, tag: &str) {
                 for yy in 0..h {
                     if !crate::av2_recon::work_tick("frm:983") { break; }
                     for xx in 0..w {
-                        if !crate::av2_recon::work_tick("frm:984") { break; }
                         let (px, py) = (px0 + xx, py0 + yy);
                         if px < rp.w && py < rp.h {
                             let m = f.pl[pl + 1].px[py * f.pl[pl + 1].stride + px] as i32;
@@ -1100,7 +1086,6 @@ pub fn mark_btype(bx4: usize, by4: usize, bw4: usize, bh4: usize, t: u8) {
         for y in by4 * 4..((by4 + bh4) * 4).min(fh) {
             if !crate::av2_recon::work_tick("frm:1031") { break; }
             for x in bx4 * 4..((bx4 + bw4) * 4).min(fw) {
-                if !crate::av2_recon::work_tick("frm:1032") { break; }
                 m[y * fw + x] = t;
             }
         }
@@ -1275,7 +1260,6 @@ pub fn dump_frame2_luma_wmap(path: &str) {
     for y4 in 0..ih4.min(60) {
         if !crate::av2_recon::work_tick("frm:1203") { break; }
         for x4 in 1..iw4.min(108) {
-            if !crate::av2_recon::work_tick("frm:1204") { break; }
             let cell = y4 * iw4 + x4;
             if db_left[cell] {
                 let level = db_lw[cell].min(db_lw[cell - 1]) as usize;
@@ -1287,7 +1271,6 @@ pub fn dump_frame2_luma_wmap(path: &str) {
     for y4 in 1..ih4.min(60) {
         if !crate::av2_recon::work_tick("frm:1213") { break; }
         for x4 in 0..iw4.min(108) {
-            if !crate::av2_recon::work_tick("frm:1214") { break; }
             let cell = y4 * iw4 + x4;
             if db_top[cell] {
                 let level = db_lh[cell].min(db_lh[cell - iw4]) as usize;
@@ -1381,7 +1364,6 @@ pub fn run_cdef_verify(deblk_path: &str, cdef_path: &str) {
     for by4 in (0..ih4).step_by(2) {
         if !crate::av2_recon::work_tick("frm:1304") { break; }
         for bx4 in (0..iw4).step_by(2) {
-            if !crate::av2_recon::work_tick("frm:1305") { break; }
             let sb = (by4 >> 4) * cdef_sbw + (bx4 >> 4);
             let ci = cdef_idx[sb];
             if ci < 0 {
@@ -1499,7 +1481,6 @@ pub fn run_ccso_verify(deblk_path: &str, cdef_path: &str, ccso_path: &str) {
             for py in 0..ph {
                 if !crate::av2_recon::work_tick("frm:1420") { break; }
                 for px in 0..pw {
-                    if !crate::av2_recon::work_tick("frm:1421") { break; }
                     let lx = (px << ss_hor) as i32;
                     let ly = (py << ss_ver) as i32;
                     let block = ((ly >> ccso_sh) as usize) * ccso_col256 + ((lx >> ccso_sh) as usize);
@@ -1700,7 +1681,6 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
                 for y in 0..p.h {
                     if !crate::av2_recon::work_tick("frm:1533") { break; }
                     for x in 0..p.w {
-                        if !crate::av2_recon::work_tick("frm:1534") { break; }
                         out.push(p.px[y * p.stride + x].clamp(0, 255) as u8);
                     }
                 }
@@ -1727,7 +1707,6 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
                 for y in 0..p.h {
                     if !crate::av2_recon::work_tick("frm:1555") { break; }
                     for x in 0..p.w {
-                        if !crate::av2_recon::work_tick("frm:1556") { break; }
                         let v = p.px[y * p.stride + x];
                         if hbd {
                             out.extend_from_slice(&(v as u16).to_le_bytes());
@@ -1930,16 +1909,13 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         for y in 0..h {
             if !crate::av2_recon::work_tick("frm:1716") { break; }
             for x in 0..w {
-                if !crate::av2_recon::work_tick("frm:1717") { break; }
                 out.push(pl0[y * w + x] as u8);
             }
         }
         for p in [&pl1, &pl2] {
             if !crate::av2_recon::work_tick("frm:1721") { break; }
             for y in 0..ch {
-                if !crate::av2_recon::work_tick("frm:1722") { break; }
                 for x in 0..cw {
-                    if !crate::av2_recon::work_tick("frm:1723") { break; }
                     out.push(p[y * cw + x] as u8);
                 }
             }
@@ -1962,7 +1938,6 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         for by4 in (0..ih4).step_by(2) {
             if !crate::av2_recon::work_tick("frm:1743") { break; }
             for bx4 in (0..iw4).step_by(2) {
-                if !crate::av2_recon::work_tick("frm:1744") { break; }
                 let sb = (by4 >> 4) * cdef_sbw + (bx4 >> 4);
                 let ci = cdef_idx[sb];
                 if ci < 0 {
@@ -2104,7 +2079,6 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             for py in 0..ph {
                 if !crate::av2_recon::work_tick("frm:1880") { break; }
                 for px in 0..pw {
-                    if !crate::av2_recon::work_tick("frm:1881") { break; }
                     let (lx, ly) = ((px << ss_hor) as i32, (py << ss_ver) as i32);
                     let block = ((ly >> ccso_sh) as usize) * ccso_col256 + ((lx >> ccso_sh) as usize);
                     if !ccso_blk[pl * ccso_n256 + block] {

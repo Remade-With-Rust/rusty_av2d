@@ -234,7 +234,6 @@ fn ext_warp_inner(
                         for j in 0..4usize {
                             if !crate::av2_recon::work_tick("av2_warp:198") { break; }
                             for i in 0..4usize {
-                                if !crate::av2_recon::work_tick("av2_warp:199") { break; }
                                 let s: i32 = (0..8).map(|k| fv[k] as i32 * mid[j + k][i]).sum();
                                 dst[(oy + j) * dstw + ox + i] = if prep { (s + 64) >> 7 } else { ((s + 1024) >> 11).clamp(0, bdmax) }; // sh = bits + interm = 11
                             }
@@ -255,7 +254,6 @@ fn ext_warp_inner(
                         for j in 0..4usize {
                             if !crate::av2_recon::work_tick("av2_warp:215") { break; }
                             for i in 0..4usize {
-                                if !crate::av2_recon::work_tick("av2_warp:216") { break; }
                                 let s: i32 = (0..8).map(|k| fv[k] as i32 * get(dx + i as i32, dy + j as i32 + k as i32 - 3)).sum();
                                 dst[(oy + j) * dstw + ox + i] = if prep { (s + 4) >> 3 } else { ((s + 64) >> 7).clamp(0, bdmax) }; // sh = bits = 7
                             }
@@ -264,7 +262,6 @@ fn ext_warp_inner(
                         for j in 0..4usize {
                             if !crate::av2_recon::work_tick("av2_warp:222") { break; }
                             for i in 0..4usize {
-                                if !crate::av2_recon::work_tick("av2_warp:223") { break; }
                                 dst[(oy + j) * dstw + ox + i] = if prep { get(dx + i as i32, dy + j as i32) << 4 } else { get(dx + i as i32, dy + j as i32) };
                             }
                         }
