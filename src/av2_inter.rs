@@ -102,7 +102,7 @@ thread_local! {
     /// Reusable H-pass intermediate for the 2D MC path (docs/plan.md Phase 1: MC used to
     /// allocate this on every one of ~40k calls per clip).
     static MC_MID: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Reusable edge-extended source row for [`fir_h_row`].
+    /// Reusable edge-extended source rows for [`fir_h_padded`].
     static MC_PAD: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -122,26 +122,59 @@ impl ReadWin {
     }
 }
 
-/// 8-tap horizontal filter of one row, reading `x - 3 ..= x + out.len() + 3` of row `y`. A row
-/// that reaches outside the window is edge-extended first, so every row runs the kernel.
+/// 8-tap horizontal filter of `rows` rows from `(x, y)`: row `r` reads `x - 3 ..= x + w + 3` of
+/// source row `y + r`, written `os` apart into `out`. Rows above or below the window repeat its
+/// edge row, and a block reaching past its left or right edge is edge-extended first, so every
+/// row runs the kernel and each run of rows is one kernel call.
 #[allow(clippy::too_many_arguments)]
-#[inline]
-fn fir_h_row(rf: &Plane, win: ReadWin, x: i32, y: i32, taps: &[i8; 8], out: &mut [i32], rnd: i32, sh: i32, clamp: i32) {
-    let n = out.len() + 7;
-    let y = y.clamp(win.y0, win.y1);
+fn fir_h_block(
+    rf: &Plane, win: ReadWin, x: i32, y: i32, taps: &[i8; 8], out: &mut [i32], os: usize, w: usize, rows: usize,
+    rnd: i32, sh: i32, clamp: i32,
+) {
+    let n = w + 7;
     let first = x - 3;
-    if first >= win.x0 && first + n as i32 - 1 <= win.x1 {
-        let base = y as usize * rf.stride + first as usize;
-        if let Some(src) = rf.px.get(base..base + n) {
-            crate::simd::fir8_row_u16(src, taps, out, rnd, sh, clamp);
-            return;
-        }
+    if first < win.x0 || first + n as i32 - 1 > win.x1 {
+        fir_h_padded(rf, win, first, y, taps, out, os, w, rows, rnd, sh, clamp);
+        return;
     }
+    // Runs of rows sharing one source stride: a clamped run repeats a single row (stride 0).
+    let mut r = 0usize;
+    while r < rows {
+        let yr = y + r as i32;
+        let (cy, run, stride) = if yr < win.y0 {
+            (win.y0, ((win.y0 - yr) as usize).min(rows - r), 0)
+        } else if yr > win.y1 {
+            (win.y1, rows - r, 0)
+        } else {
+            (yr, ((win.y1 - yr + 1) as usize).min(rows - r), rf.stride)
+        };
+        let base = cy as usize * rf.stride + first as usize;
+        let out_run = &mut out[r * os..];
+        match rf.px.get(base..base + (run - 1) * stride + n) {
+            Some(src) => crate::simd::fir8_h_u16(src, stride, taps, out_run, os, w, run, rnd, sh, clamp),
+            // HARDENING: a plane shorter than its stated size reads as edge-extended samples.
+            None => fir_h_padded(rf, win, first, yr, taps, out_run, os, w, run, rnd, sh, clamp),
+        }
+        r += run;
+    }
+}
+
+/// [`fir_h_block`] for a block reaching past its window: gathers the clamped samples of every row,
+/// then filters them in one kernel call.
+#[allow(clippy::too_many_arguments)]
+fn fir_h_padded(
+    rf: &Plane, win: ReadWin, first: i32, y: i32, taps: &[i8; 8], out: &mut [i32], os: usize, w: usize, rows: usize,
+    rnd: i32, sh: i32, clamp: i32,
+) {
+    let n = w + 7;
     MC_PAD.with(|c| {
         let mut pad = c.borrow_mut();
         pad.clear();
-        pad.extend((0..n as i32).map(|i| win.sample(rf, first + i, y) as u16));
-        crate::simd::fir8_row_u16(&pad, taps, out, rnd, sh, clamp);
+        for r in 0..rows {
+            let yr = y + r as i32;
+            pad.extend((0..n as i32).map(|i| win.sample(rf, first + i, yr) as u16));
+        }
+        crate::simd::fir8_h_u16(&pad, n, taps, out, os, w, rows, rnd, sh, clamp);
     });
 }
 
@@ -159,12 +192,7 @@ fn fir_v_extended(
             let sy = y - 3 + yy as i32;
             mid.extend((0..w as i32).map(|xx| win.sample(rf, x + xx, sy)));
         }
-        for yy in 0..h {
-            if !crate::av2_recon::work_tick("av2_inter:fir_v_extended") {
-                break;
-            }
-            crate::simd::fir8_col(&mid[yy * w..(yy + 7) * w + w], w, taps, &mut dst[yy * dst_w..yy * dst_w + w], rnd, sh, clamp);
-        }
+        crate::simd::fir8_v(&mid, w, taps, dst, dst_w, w, h, rnd, sh, clamp);
     });
 }
 
@@ -216,81 +244,34 @@ fn mc_core(
                 }
                 let mid = &mut mid_b[..midh * w];
                 if interior {
-                    for yy in 0..midh {
-                        let base = ((dy - 3 + yy as i32) as usize) * stride + (dx - 3) as usize;
-                        crate::simd::fir8_row_u16(
-                            &px[base..base + w + 7],
-                            fh,
-                            &mut mid[yy * w..yy * w + w],
-                            (1 << h_sh) >> 1,
-                            h_sh,
-                            -1,
-                        );
-                    }
+                    let base = ((dy - 3) as usize) * stride + (dx - 3) as usize;
+                    crate::simd::fir8_h_u16(&px[base..], stride, fh, mid, w, w, midh, (1 << h_sh) >> 1, h_sh, -1);
                 } else {
-                    for yy in 0..midh {
-                        if !crate::av2_recon::work_tick("av2_inter:mc2d_h") { break; }
-                        fir_h_row(rf, win, dx, dy - 3 + yy as i32, fh, &mut mid[yy * w..yy * w + w], (1 << h_sh) >> 1, h_sh, -1);
-                    }
+                    fir_h_block(rf, win, dx, dy - 3, fh, mid, w, w, midh, (1 << h_sh) >> 1, h_sh, -1);
                 }
-                let vclamp = if prep { -1 } else { bdmax };
-                for yy in 0..h {
-                    if !crate::av2_recon::work_tick("av2_inter:mc2d_v") { break; }
-                    crate::simd::fir8_col(
-                        &mid[yy * w..(yy + 7) * w + w],
-                        w,
-                        fv,
-                        &mut dst[yy * dst_w..yy * dst_w + w],
-                        (1 << v_sh) >> 1,
-                        v_sh,
-                        vclamp,
-                    );
-                }
+                crate::simd::fir8_v(mid, w, fv, dst, dst_w, w, h, (1 << v_sh) >> 1, v_sh, if prep { -1 } else { bdmax });
             });
         }
         (Some(fh), None) => {
             // put: (s + 34) >> 6 clamped; prep: (s + 2) >> 2 unclamped.
             let (sh, rnd) = if prep { (BITS - IB, (1 << (BITS - IB)) >> 1) } else { (BITS, ((1 << BITS) >> 1) + ((1 << (BITS - IB)) >> 1)) };
+            let clamp = if prep { -1 } else { bdmax };
             if interior {
-                let clamp = if prep { -1 } else { bdmax };
-                for yy in 0..h {
-                    let base = ((dy + yy as i32) as usize) * stride + (dx - 3) as usize;
-                    crate::simd::fir8_row_u16(
-                        &px[base..base + w + 7],
-                        fh,
-                        &mut dst[yy * dst_w..yy * dst_w + w],
-                        rnd,
-                        sh,
-                        clamp,
-                    );
-                }
+                let base = (dy as usize) * stride + (dx - 3) as usize;
+                crate::simd::fir8_h_u16(&px[base..], stride, fh, dst, dst_w, w, h, rnd, sh, clamp);
             } else {
-                let clamp = if prep { -1 } else { bdmax };
-                for yy in 0..h {
-                    if !crate::av2_recon::work_tick("av2_inter:mc_h") { break; }
-                    fir_h_row(rf, win, dx, dy + yy as i32, fh, &mut dst[yy * dst_w..yy * dst_w + w], rnd, sh, clamp);
-                }
+                fir_h_block(rf, win, dx, dy, fh, dst, dst_w, w, h, rnd, sh, clamp);
             }
         }
         (None, Some(fv)) => {
             // put: (s + 32) >> 6 clamped; prep: (s + 2) >> 2 unclamped.
             let (sh, rnd) = if prep { (BITS - IB, (1 << (BITS - IB)) >> 1) } else { (BITS, (1 << BITS) >> 1) };
+            let clamp = if prep { -1 } else { bdmax };
             if interior {
-                let clamp = if prep { -1 } else { bdmax };
-                for yy in 0..h {
-                    let base = ((dy - 3 + yy as i32) as usize) * stride + dx as usize;
-                    crate::simd::fir8_col_u16(
-                        &px[base..base + 7 * stride + w],
-                        stride,
-                        fv,
-                        &mut dst[yy * dst_w..yy * dst_w + w],
-                        rnd,
-                        sh,
-                        clamp,
-                    );
-                }
+                let base = ((dy - 3) as usize) * stride + dx as usize;
+                crate::simd::fir8_v_u16(&px[base..], stride, fv, dst, dst_w, w, h, rnd, sh, clamp);
             } else {
-                fir_v_extended(rf, win, dx, dy, w, h, fv, dst, dst_w, rnd, sh, if prep { -1 } else { bdmax });
+                fir_v_extended(rf, win, dx, dy, w, h, fv, dst, dst_w, rnd, sh, clamp);
             }
         }
         (None, None) => {
@@ -327,26 +308,26 @@ fn mc_core(
 
 /// dav2d `avg_c` (mc_tmpl.c:673): (t1 + t2 + 16) >> 5, clamped.
 pub fn comp_avg(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize, h: usize, bdmax: i32) {
-    for y in 0..h {
-        if !crate::av2_recon::work_tick("av2_inter:223") { break; }
-        crate::simd::avg_row(&t1[y * w..y * w + w], &t2[y * w..y * w + w], &mut dst[y * dst_w..y * dst_w + w], bdmax);
+    if !crate::av2_recon::work_tick("av2_inter:223") {
+        return;
     }
+    crate::simd::avg(t1, t2, w, dst, dst_w, w, h, bdmax);
 }
 
 /// dav2d `w_avg_c` (mc_tmpl.c:694): (t1*wt + t2*(16-wt) + 128) >> 8, clamped.
 pub fn comp_w_avg(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize, h: usize, wt: i32, bdmax: i32) {
-    for y in 0..h {
-        if !crate::av2_recon::work_tick("av2_inter:232") { break; }
-        crate::simd::w_avg_row(&t1[y * w..y * w + w], &t2[y * w..y * w + w], &mut dst[y * dst_w..y * dst_w + w], wt, bdmax);
+    if !crate::av2_recon::work_tick("av2_inter:232") {
+        return;
     }
+    crate::simd::w_avg(t1, t2, w, dst, dst_w, w, h, wt, bdmax);
 }
 
 /// dav2d `mask_c` (mc_tmpl.c:716): (t1*m + t2*(64-m) + 512) >> 10, clamped. `mask` stride = w.
 pub fn comp_mask(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize, h: usize, mask: &[u8], bdmax: i32) {
-    for y in 0..h {
-        if !crate::av2_recon::work_tick("av2_inter:241") { break; }
-        crate::simd::mask_row(&t1[y * w..y * w + w], &t2[y * w..y * w + w], &mask[y * w..y * w + w], &mut dst[y * dst_w..y * dst_w + w], bdmax);
+    if !crate::av2_recon::work_tick("av2_inter:241") {
+        return;
     }
+    crate::simd::mask(t1, t2, mask, w, dst, dst_w, w, h, bdmax);
 }
 
 /// dav2d `w_mask_c` 420 variant (mc_tmpl.c:754): SEG difference-mask blend. Computes the per-pixel
@@ -511,30 +492,13 @@ pub fn prep_opfl(
                     mid_b.resize(midh * w, 0);
                 }
                 let mid = &mut mid_b[..midh * w];
-                for yy in 0..midh {
-                    if !crate::av2_recon::work_tick("av2_inter:397") { break; }
-                    fir_h_row(rf, win, dx, dy - 3 + yy as i32, fh, &mut mid[yy * w..yy * w + w], (1 << h_sh) >> 1, h_sh, -1);
-                }
-                for yy in 0..h {
-                    if !crate::av2_recon::work_tick("av2_inter:405") { break; }
-                    crate::simd::fir8_col(
-                        &mid[yy * w..(yy + 7) * w + w],
-                        w,
-                        fv,
-                        &mut dst[yy * dstride..yy * dstride + w],
-                        (1 << BITS) >> 1,
-                        BITS,
-                        -1,
-                    );
-                }
+                fir_h_block(rf, win, dx, dy - 3, fh, mid, w, w, midh, (1 << h_sh) >> 1, h_sh, -1);
+                crate::simd::fir8_v(mid, w, fv, dst, dstride, w, h, (1 << BITS) >> 1, BITS, -1);
             });
         }
         (Some(fh), None) => {
             let sh = BITS - IB;
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:414") { break; }
-                fir_h_row(rf, win, dx, dy + yy as i32, fh, &mut dst[yy * dstride..yy * dstride + w], (1 << sh) >> 1, sh, -1);
-            }
+            fir_h_block(rf, win, dx, dy, fh, dst, dstride, w, h, (1 << sh) >> 1, sh, -1);
         }
         (None, Some(fv)) => {
             let sh = BITS - IB;
@@ -545,19 +509,8 @@ pub fn prep_opfl(
                 && dy + h as i32 + 3 <= win.y1
                 && rf.px.len() >= (dy + h as i32 + 3) as usize * rf.stride + dx as usize + w;
             if interior {
-                for yy in 0..h {
-                    if !crate::av2_recon::work_tick("av2_inter:425") { break; }
-                    let base = (dy - 3) as usize * rf.stride + dx as usize + yy * rf.stride;
-                    crate::simd::fir8_col_u16(
-                        &rf.px[base..base + 7 * rf.stride + w],
-                        rf.stride,
-                        fv,
-                        &mut dst[yy * dstride..yy * dstride + w],
-                        rnd,
-                        sh,
-                        -1,
-                    );
-                }
+                let base = (dy - 3) as usize * rf.stride + dx as usize;
+                crate::simd::fir8_v_u16(&rf.px[base..], rf.stride, fv, dst, dstride, w, h, rnd, sh, -1);
             } else {
                 fir_v_extended(rf, win, dx, dy, w, h, fv, dst, dstride, rnd, sh, -1);
             }
