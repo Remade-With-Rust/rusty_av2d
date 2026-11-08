@@ -2076,27 +2076,31 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             let shift = bd.saturating_sub(pc.max_band_log2);
             let (dy, dx) = (CCSO_POS[pc.ext_filter][0] as i32, CCSO_POS[pc.ext_filter][1] as i32);
             let q = pc.quant_step;
+            let ccsodbg = crate::env_is_set!("CCSODBG");
             for py in 0..ph {
                 if !crate::av2_recon::work_tick("frm:1880") { break; }
+                // Everything that depends only on the row, once per row.
+                let ly = (py << ss_ver) as i32;
+                let blk_row = pl * ccso_n256 + ((ly >> ccso_sh) as usize) * ccso_col256;
+                let (rc, r0, r1) = (ly * wi, cl(ly + dy, hi) * wi, cl(ly - dy, hi) * wi);
                 for px in 0..pw {
-                    let (lx, ly) = ((px << ss_hor) as i32, (py << ss_ver) as i32);
-                    let block = ((ly >> ccso_sh) as usize) * ccso_col256 + ((lx >> ccso_sh) as usize);
-                    if !ccso_blk[pl * ccso_n256 + block] {
+                    let lx = (px << ss_hor) as i32;
+                    if !ccso_blk[blk_row + ((lx >> ccso_sh) as usize)] {
                         continue;
                     }
-                    let center = deblk_luma[(ly * wi + lx) as usize];
+                    let center = deblk_luma[(rc + lx) as usize];
                     let band = if single_band { 0 } else { center >> shift };
                     let (cls0, cls1) = if pc.bo_only {
                         (0u32, 0u32)
                     } else {
-                        let n0 = deblk_luma[(cl(ly + dy, hi) * wi + cl(lx + dx, wi)) as usize];
-                        let n1 = deblk_luma[(cl(ly - dy, hi) * wi + cl(lx - dx, wi)) as usize];
+                        let n0 = deblk_luma[(r0 + cl(lx + dx, wi)) as usize];
+                        let n1 = deblk_luma[(r1 + cl(lx - dx, wi)) as usize];
                         (ccso_score(n0 - center, q, pc.edge_clf), ccso_score(n1 - center, q, pc.edge_clf))
                     };
                     let lut = ((band as usize) << 4) | ((cls0 as usize) << 2) | (cls1 as usize);
                     let offset = pc.filter_offset.get(lut).copied().unwrap_or(0) as i32;
                     let idx = py * pw + px;
-                    if crate::env_is_set!("CCSODBG") && pl == 0 && py == 0 && (px == 338 || px == 167) {
+                    if ccsodbg && pl == 0 && py == 0 && (px == 338 || px == 167) {
                         crate::dlog!("[MCCSOA] px={px} src={center} band={band} cls={cls0},{cls1} off={offset} dst_in={} thr={q} shift={shift} bo={} eclf={} ext={}", out[idx], pc.bo_only as u8, pc.edge_clf as u8, pc.ext_filter);
                     }
                     out[idx] = (out[idx] + offset).clamp(0, bdmax);
