@@ -341,20 +341,23 @@ pub fn comp_w_mask_ss(
     // dav w_mask (mc_tmpl.c, dav1d heritage): blend by the derived 6-bit mask and store the
     // CHROMA-resolution mask: 444 = m; 422 = (m+n+1-sign)>>1; 420 = two-row fold
     // (m+n [+row0] + 2 - sign) >> 2.
-    const MASK_SH: i32 = 8; // bitdepth(8) + intermediate_bits(4) - 4
-    const MASK_RND: i32 = 1 << (MASK_SH - 5);
+    // dav2d w_mask: mask_sh = bitdepth + intermediate_bits - 4 (intermediate_bits is 4 at 8 and
+    // 10 bits here), so 8 at 8-bit and 10 at 10-bit.
+    let bitdepth = 32 - (bdmax as u32).leading_zeros() as i32;
+    let mask_sh = bitdepth + 4 - 4;
+    let mask_rnd = 1 << (mask_sh - 5);
     let mut mrow = 0usize;
     for y in 0..h {
         if !crate::av2_recon::work_tick("av2_inter:263") { break; }
         let mut x = 0usize;
         while x < w {
             let d = t1[y * w + x] - t2[y * w + x];
-            let m = (38 + ((d.abs() + MASK_RND) >> MASK_SH)).min(64);
+            let m = (38 + ((d.abs() + mask_rnd) >> mask_sh)).min(64);
             dst[y * dst_w + x] = ((d * m + t2[y * w + x] * 64 + 512) >> 10).clamp(0, bdmax);
             if ss_hor == 1 {
                 x += 1;
                 let d2 = t1[y * w + x] - t2[y * w + x];
-                let n = (38 + ((d2.abs() + MASK_RND) >> MASK_SH)).min(64);
+                let n = (38 + ((d2.abs() + mask_rnd) >> mask_sh)).min(64);
                 dst[y * dst_w + x] = ((d2 * n + t2[y * w + x] * 64 + 512) >> 10).clamp(0, bdmax);
                 let cell = &mut mask_out[mrow * mask_stride + (x >> 1)];
                 if ss_ver == 1 {
