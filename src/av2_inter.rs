@@ -397,14 +397,51 @@ pub fn bacp_mask(
 
 // ===================== TIP / OPFL prediction kernels (dav2d mc_tmpl.c + recon_tmpl.c) =====================
 
-/// Windowed sample fetch (dav `mc`/`mc_opfl` emu_edge semantics): replicate-pad from the
-/// rectangle [l..r) x [t..b) of the plane.
-#[inline]
-fn wget(rf: &Plane, x: i32, y: i32, l: i32, r: i32, t: i32, b: i32) -> i32 {
-    // HARDENING: a corrupt warp/ref rectangle can invert or exceed the plane — clamp into it.
-    let (rx, by) = (r.max(l + 1).min(rf.w as i32), b.max(t + 1).min(rf.h as i32));
-    let (lx, ty) = (l.max(0).min(rx - 1), t.max(0).min(by - 1));
-    rf.at(x.clamp(lx, rx - 1) as usize, y.clamp(ty, by - 1) as usize)
+/// A clamped fetch window over a reference plane: `wget(x, y)` reads the sample at (x, y) clamped
+/// into the window, itself clamped into the plane, and 0 outside the plane's storage (the
+/// `Plane::at` discipline). The window bounds are resolved once, not per sample.
+struct BilinWin<'a> {
+    px: &'a [u16],
+    stride: usize,
+    lx: i32,
+    rx1: i32,
+    ty: i32,
+    by1: i32,
+}
+
+impl<'a> BilinWin<'a> {
+    fn new(rf: &'a Plane, (l, r, t, b): (i32, i32, i32, i32)) -> Self {
+        // HARDENING: a corrupt warp/ref rectangle can invert or exceed the plane — clamp into it.
+        let (rx, by) = (r.max(l + 1).min(rf.w as i32), b.max(t + 1).min(rf.h as i32));
+        let (lx, ty) = (l.max(0).min(rx - 1), t.max(0).min(by - 1));
+        BilinWin { px: &rf.px, stride: rf.stride, lx, rx1: rx - 1, ty, by1: by - 1 }
+    }
+
+    /// The storage offset of row `y`'s clamped start.
+    #[inline(always)]
+    fn row(&self, y: i32) -> usize {
+        (y.clamp(self.ty, self.by1) as usize).wrapping_mul(self.stride)
+    }
+
+    #[inline(always)]
+    fn get(&self, row: usize, x: i32) -> i32 {
+        self.px.get(row.wrapping_add(x.clamp(self.lx, self.rx1) as usize)).map_or(0, |&v| v as i32)
+    }
+
+    /// Rows `y0..y0 + rows` x columns `x0..x0 + cols` as plain slices, when that rectangle lies
+    /// inside the window (so no clamp would move any read) and inside the storage.
+    fn interior(&self, x0: i32, y0: i32, cols: usize, rows: usize) -> Option<impl Fn(usize) -> &'a [u16] + '_> {
+        let inside = x0 >= self.lx
+            && x0 + cols as i32 - 1 <= self.rx1
+            && y0 >= self.ty
+            && y0 + rows as i32 - 1 <= self.by1
+            && (y0 as usize + rows - 1) * self.stride + x0 as usize + cols <= self.px.len();
+        let (px, stride) = (self.px, self.stride);
+        inside.then(move || move |r: usize| {
+            let o = (y0 as usize + r) * stride + x0 as usize;
+            &px[o..o + cols]
+        })
+    }
 }
 
 /// dav2d `put_bilin_c` via the windowed `mc()` (8-bit PUT, mv at 1/8-pel, bilinear 2-tap).
@@ -413,20 +450,63 @@ pub fn put_bilin_win(
     rf: &Plane, dst: &mut [i32], dstride: usize, bx_px: i32, by_px: i32, w: usize, h: usize,
     mvy: i32, mvx: i32, win: (i32, i32, i32, i32),
 ) {
-    let (l, r, t, b) = win;
+    let wn = BilinWin::new(rf, win);
     let bdmax = crate::av2_frame::BDMAX.with(|c| c.get());
     let mx = (mvx & 7) << 1;
     let my = (mvy & 7) << 1;
     let dx = bx_px + (mvx >> 3);
     let dy = by_px + (mvy >> 3);
     let bil = |v0: i32, v1: i32, m: i32| 16 * v0 + m * (v1 - v0);
+    // Interior fast path: the whole (w+1) x (h+1) fetch lies inside the window, so every read is
+    // a plain slice element, the same value the clamped fetch returns. Most TIP cells qualify.
+    if w > 0 && h > 0 {
+        if let Some(src) = wn.interior(dx, dy, w + 1, h + 1) {
+            if mx != 0 && my != 0 {
+                let mut mid = vec![0i32; (h + 1) * w];
+                for yy in 0..h + 1 {
+                    let r = src(yy);
+                    for (m, (a, b)) in mid[yy * w..(yy + 1) * w].iter_mut().zip(r.iter().zip(&r[1..])) {
+                        *m = bil(*a as i32, *b as i32, mx);
+                    }
+                }
+                for yy in 0..h {
+                    let (m0, m1) = (&mid[yy * w..(yy + 1) * w], &mid[(yy + 1) * w..(yy + 2) * w]);
+                    for (d, (a, b)) in dst[yy * dstride..yy * dstride + w].iter_mut().zip(m0.iter().zip(m1)) {
+                        *d = ((bil(*a, *b, my) + 128) >> 8).clamp(0, bdmax);
+                    }
+                }
+            } else if mx != 0 {
+                for yy in 0..h {
+                    let r = src(yy);
+                    for (d, (a, b)) in dst[yy * dstride..yy * dstride + w].iter_mut().zip(r.iter().zip(&r[1..])) {
+                        *d = ((bil(*a as i32, *b as i32, mx) + 8) >> 4).clamp(0, bdmax);
+                    }
+                }
+            } else if my != 0 {
+                for yy in 0..h {
+                    let (r0, r1) = (src(yy), src(yy + 1));
+                    for (d, (a, b)) in dst[yy * dstride..yy * dstride + w].iter_mut().zip(r0.iter().zip(r1)) {
+                        *d = ((bil(*a as i32, *b as i32, my) + 8) >> 4).clamp(0, bdmax);
+                    }
+                }
+            } else {
+                for yy in 0..h {
+                    for (d, a) in dst[yy * dstride..yy * dstride + w].iter_mut().zip(src(yy)) {
+                        *d = *a as i32;
+                    }
+                }
+            }
+            return;
+        }
+    }
     if mx != 0 && my != 0 {
         let mut mid = vec![0i32; (h + 1) * w];
         for yy in 0..h + 1 {
             if !crate::av2_recon::work_tick("av2_inter:337") { break; }
+            let row = wn.row(dy + yy as i32);
             for xx in 0..w {
-                let (sx, sy) = (dx + xx as i32, dy + yy as i32);
-                mid[yy * w + xx] = bil(wget(rf, sx, sy, l, r, t, b), wget(rf, sx + 1, sy, l, r, t, b), mx);
+                let sx = dx + xx as i32;
+                mid[yy * w + xx] = bil(wn.get(row, sx), wn.get(row, sx + 1), mx);
             }
         }
         for yy in 0..h {
@@ -439,26 +519,29 @@ pub fn put_bilin_win(
     } else if mx != 0 {
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:350") { break; }
+            let row = wn.row(dy + yy as i32);
             for xx in 0..w {
-                let (sx, sy) = (dx + xx as i32, dy + yy as i32);
-                let px = bil(wget(rf, sx, sy, l, r, t, b), wget(rf, sx + 1, sy, l, r, t, b), mx);
+                let sx = dx + xx as i32;
+                let px = bil(wn.get(row, sx), wn.get(row, sx + 1), mx);
                 dst[yy * dstride + xx] = ((px + 8) >> 4).clamp(0, bdmax);
             }
         }
     } else if my != 0 {
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:358") { break; }
+            let (r0, r1) = (wn.row(dy + yy as i32), wn.row(dy + yy as i32 + 1));
             for xx in 0..w {
-                let (sx, sy) = (dx + xx as i32, dy + yy as i32);
-                let v = bil(wget(rf, sx, sy, l, r, t, b), wget(rf, sx, sy + 1, l, r, t, b), my);
+                let sx = dx + xx as i32;
+                let v = bil(wn.get(r0, sx), wn.get(r1, sx), my);
                 dst[yy * dstride + xx] = ((v + 8) >> 4).clamp(0, bdmax);
             }
         }
     } else {
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:366") { break; }
+            let row = wn.row(dy + yy as i32);
             for xx in 0..w {
-                dst[yy * dstride + xx] = wget(rf, dx + xx as i32, dy + yy as i32, l, r, t, b);
+                dst[yy * dstride + xx] = wn.get(row, dx + xx as i32);
             }
         }
     }
