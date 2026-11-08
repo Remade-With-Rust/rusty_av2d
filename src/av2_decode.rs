@@ -164,7 +164,7 @@ pub fn decode_partition(
     // blocks (both half-splits invalid, `PART_HALF == [-1,-1]`) don't recurse normatively
     // — also an uncoded NONE (dav2d `(pcc->part[0][0] & pcc->part[1][0]) == -1`).
     let ph = PART_HALF[bs];
-    let pdbg = std::env::var("SBI").is_ok() && bs == 27 && yb4 == 0 && xb4 <= 1;
+    let pdbg = crate::envflag::is_set("SBI") && bs == 27 && yb4 == 0 && xb4 <= 1;
     if pdbg { crate::dlog!("[PD] ({xb4},{yb4}) bs={bs} bw4={bw4} bh4={bh4} ph={ph:?} mix_inter={mix_inter} bd23={} have_h={have_h_split} have_v={have_v_split} r_in={}", bd[2]+bd[3], msac.rng); }
     // Chroma-plane shape validity (avm ss_size_lookup, sizes <= 64px): the subsampled
     // shape must have both dims >= 4px and aspect <= 8:1. `lw`/`lh` are LUMA log2-4px dims
@@ -225,14 +225,14 @@ pub fn decode_partition(
     // (cleared neighbours → 0, matching the top-left descent).
     let ctx1 = get_partition_ctx(a_part, l_part, &bd, xb4, yb4) as usize;
     let ctx2 = ctx1 + pcc[0] as usize * 4;
-    if std::env::var("P32CDF").is_ok() && pl == 0 && xb4 == 0 && yb4 == 0 && (bs == 12 || bs == 7 || bs == 6) {
+    if crate::envflag::is_set("P32CDF") && pl == 0 && xb4 == 0 && yb4 == 0 && (bs == 12 || bs == 7 || bs == 6) {
         let ctx4 = ctx1 + pcc[1] as usize * 4;
         crate::dlog!("P32CDF bs={bs} ctx1={ctx1} ctx2={ctx2} split_cell={:?} ctx4={ctx4} dir_cell={:?} rng_in={}", m.part_split[pl][ctx2], m.part_dir[pl][ctx4], msac.rng);
     }
     // In a MIXED inter region, a 4x8/8x4 block (`b_dim[2]+b_dim[3]==1`) cannot split — 4x4 in
     // such a region is invalid — so the partition is a forced NONE with NO coded symbol (dav2d
     // decode.c:3800). This does NOT apply to keyframes or intra regions (mix_inter=false).
-    let mpart = std::env::var("MPART").map_or(false, |v| pl == 1 || v == "all");
+    let mpart = crate::envflag::get("MPART").map_or(false, |v| pl == 1 || v == "all");
     if mpart { crate::dlog!("[MPARTIN] mi=({xb4},{yb4}) bs={bs} ctx2={ctx2} cell={:?} rng={}", m.part_split[pl][ctx2], msac.rng); }
     let is_split = if mix_inter && (bd[2] + bd[3]) == 1 {
         false
@@ -318,7 +318,7 @@ pub fn decode_partition(
             panic!("[PDNEG] dir read with pcc[1]=-1: bs={bs} pl={pl} mi=({xb4},{yb4}) bw4={bw4} bh4={bh4} aspect_log2={aspect_log2} v={v_aspect} h={h_aspect}");
         }
         let ctx4 = ctx1 + pcc[1] as usize * 4;
-        if std::env::var("PDCDF").is_ok() && pl == 0 && xb4 == 0 && yb4 == 0 && (bs == 18 || bs == 6 || bs == 7) {
+        if crate::envflag::is_set("PDCDF") && pl == 0 && xb4 == 0 && yb4 == 0 && (bs == 18 || bs == 6 || bs == 7) {
             crate::dlog!("[PDCDF] bs={bs} ctx4={ctx4} part_dir_cell={:?} rng={} dif={:x}", m.part_dir[pl][ctx4], msac.rng, msac.dif);
         }
         if mpart { crate::dlog!("[MPARTRTC] mi=({xb4},{yb4}) bs={bs} ctx4={ctx4} cell={:?} pre rng={}", m.part_dir[pl][ctx4], msac.rng); }
@@ -326,7 +326,7 @@ pub fn decode_partition(
     };
     if mpart { crate::dlog!("[MPARTRT] mi=({xb4},{yb4}) bs={bs} dir={dir} rng={}", msac.rng); }
     let mut bp = if dir == 1 { BlockPartition::V } else { BlockPartition::H };
-    if std::env::var("P32CDF").is_ok() && pl == 0 && xb4 == 0 && yb4 == 0 && bs == 7 {
+    if crate::envflag::is_set("P32CDF") && pl == 0 && xb4 == 0 && yb4 == 0 && bs == 7 {
         crate::dlog!("[PXMID] bs=7 after part_dir dir={dir} rng={} dif={:x}", msac.rng, msac.dif);
     }
 
@@ -446,7 +446,7 @@ pub fn decode_partition(
             let ctx6 = ctx5 + pcc[0] as usize * 4;
             let is_ext = rav1d_msac_decode_bool_adapt(msac, &mut m.part_ext[pl][ctx6]);
             if mpart { crate::dlog!("[MPARTEXT] mi=({xb4},{yb4}) bs={bs} ext={} hv3={has_hv3} hv4ab={has_hv4ab} rng={}", is_ext as u8, msac.rng); }
-            if std::env::var("P32CDF").is_ok() && pl == 0 && xb4 == 0 && yb4 == 0 && bs == 7 {
+            if crate::envflag::is_set("P32CDF") && pl == 0 && xb4 == 0 && yb4 == 0 && bs == 7 {
                 crate::dlog!("[PXEXT] bs=7 is_ext={} ctx5={ctx5} ctx6={ctx6} hv3={has_hv3} hv4ab={has_hv4ab} rng={} dif={:x}", is_ext as u8, msac.rng, msac.dif);
             }
             if is_ext {

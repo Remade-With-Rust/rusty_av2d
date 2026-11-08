@@ -583,7 +583,7 @@ fn parse_av2_frame_hdr_front(
             });
             crate::av2_recon::CUR_REF_POC.with(|c| c.set((ohb, frame_order_hint, refpoc)));
         }
-        if std::env::var("OHDBG").is_ok() {
+        if crate::envflag::is_set("OHDBG") {
             crate::dlog!("[MINE-OH] type={} order_hint={} n_ref={} bothside={} refidx={},{},{},{},{},{},{}",
                 frame_type, frame_order_hint, n_ref_frames, has_bothside_refs as u8,
                 refidx[0], refidx[1], refidx[2], refidx[3], refidx[4], refidx[5], refidx[6]);
@@ -870,7 +870,7 @@ fn parse_av2_frame_hdr_front(
                     if r1 as u32 != primary_ref_frame { r1 as u32 } else { r0 as u32 };
             }
         }
-        if std::env::var("PREFDBG").is_ok() {
+        if crate::envflag::is_set("PREFDBG") {
             crate::dlog!("[PREF] poc={frame_order_hint} signaled={primary_ref_signaled} resolved={primary_ref_frame} sec={secondary_ref_frame}");
         }
         // Publish primary+secondary so the SB-loop can inherit/average the CDF (dav2d 5394-5413).
@@ -924,7 +924,7 @@ fn parse_av2_frame_hdr_front(
             crate::av2_dequant::dq_lookup(clipq(vac_delta + base_uvac)),
         ]));
         crate::av2_frame::F2_QDELTAS.with(|c| c.set([ydc_delta, udc_delta, vdc_delta, uac_delta, vac_delta]));
-        if std::env::var("QDBG").is_ok() {
+        if crate::envflag::is_set("QDBG") {
             crate::dlog!("[QDBG] yac={yac} ydc_d={ydc_delta} udc_d={udc_delta} vdc_d={vdc_delta} uac_d={uac_delta} vac_d={vac_delta}");
         }
         // [IS_INTER_OR_SWITCH secondary_ref derive: keyframe skips]
@@ -953,7 +953,7 @@ fn parse_av2_frame_hdr_front(
         }
         // quantizer matrix (obu.c:1510)
         let qm_enabled = gb.get_bit();
-        if std::env::var("MHDRQ").is_ok() { crate::dlog!("[MHDRQ] yac={yac} qm={}", qm_enabled as u8); }
+        if crate::envflag::is_set("MHDRQ") { crate::dlog!("[MHDRQ] yac={yac} qm={}", qm_enabled as u8); }
         if qm_enabled {
             // avm setup_qm_params (decodeframe.c:3697): per-set qm levels; predefined matrices
             // (the decoder-default qm_list; no QM OBU minted so far — user matrices are a loud
@@ -1011,7 +1011,7 @@ fn parse_av2_frame_hdr_front(
         if !all_lossless {
             if frame_type == 1 && seq_hdr.av2.db_sub_pu != 0 {
                 lf_sub_pu = gb.get_bit();
-                if std::env::var("MHDRQ").is_ok() { crate::dlog!("[MHDRQ] lf_sub_pu={}", lf_sub_pu as u8); }
+                if crate::envflag::is_set("MHDRQ") { crate::dlog!("[MHDRQ] lf_sub_pu={}", lf_sub_pu as u8); }
             }
             let level_y0 = gb.get_bit();
             let level_y1 = gb.get_bit();
@@ -1280,7 +1280,7 @@ fn parse_av2_frame_hdr_front(
                         } else {
                             av2_subexp_u(gb, (range >> 1) as u32, range as u32, 4) as usize
                         };
-                        if std::env::var("MLRH").is_ok() {
+                        if crate::envflag::is_set("MLRH") {
                             crate::dlog!("[MLRP] n={n} group={group} pred={pred_grp} base={base} range={range} fref={} off={}", filter_refs[n], gb.pos() - lr_off0);
                         }
                     }
@@ -1309,7 +1309,7 @@ fn parse_av2_frame_hdr_front(
                             f[..16].copy_from_slice(src);
                             f
                         };
-                        if std::env::var("MLRH").is_ok() {
+                        if crate::envflag::is_set("MLRH") {
                             crate::dlog!("[MLRR] n={n} r={r} exact={} ref_filter={:?}", (exact_match_mask >> n) & 1, &ref_filter[..6]);
                         }
                         if exact_match_mask & (1 << n) != 0 {
@@ -1324,7 +1324,7 @@ fn parse_av2_frame_hdr_front(
                             }
                             s += 1;
                         }
-                        if std::env::var("MLRH").is_ok() {
+                        if crate::envflag::is_set("MLRH") {
                             crate::dlog!("[MLRS] n={n} s={s} off={}", gb.pos() - lr_off0);
                         }
                         let mask: u32 = if p != 0 {
@@ -1347,7 +1347,7 @@ fn parse_av2_frame_hdr_front(
                         }
                     }
                 }
-                if std::env::var("MLRH").is_ok() {
+                if crate::envflag::is_set("MLRH") {
                     crate::dlog!("[MLRH] restoration y={} u={} v={} ffon={}/{}/{} ncls={} usz={}/{} nbits={}", lr.p[0].r_type, lr.p[1].r_type, lr.p[2].r_type, lr.p[0].ffon as u8, lr.p[1].ffon as u8, lr.p[2].ffon as u8, lr.p[0].num_classes, lr.unit_size[0], lr.unit_size[1], gb.pos() - lr_off0);
                     if lr.p[0].ffon {
                         for n in 0..lr.p[0].num_classes as usize {
@@ -1477,7 +1477,7 @@ fn parse_av2_frame_hdr_front(
                         reuse_slot,
                     };
                 }
-                if std::env::var("CCSODBG2").is_ok() {
+                if crate::envflag::is_set("CCSODBG2") {
                     for pp in 0..3 {
                         let pc = &ccfg.p[pp];
                         crate::dlog!("[MCCSO] poc={frame_order_hint} p={pp} en={} sbreuse={} slot={} boonly={} quant={} eclf={} maxband={} off=[{} {} {} {} {} {} {} {}]",
@@ -1849,7 +1849,7 @@ fn parse_seq_hdr(
         crate::av2_frame::INTER_DDT.with(|c| c.set(inter_ddt));
         crate::av2_recon::SEQ_REDUCED_TX_PART.with(|c| c.set(gb.get_bit())); // reduced_tx_part_set
         let seq_cctx = if !is_i400 { gb.get_bit() } else { false };
-        if std::env::var("SEQDBG").is_ok() {
+        if crate::envflag::is_set("SEQDBG") {
             let t = crate::av2_recon::SEQ_TOOLS.with(|c| c.get());
             crate::dlog!("[SEQDBG] bawp={} amvd={} signd={} mrls={} ist={} ist_inter={} ibp={} edge={} drlro={} rmvb={} cctx_pre={}",
                 t.bawp, t.adaptive_mvd, t.mvd_sign_derive, t.mrls, t.ist, t.ist_inter, t.ibp, t.edge_filter, t.drl_reorder, t.refmvbank, seq_cctx);
@@ -2979,7 +2979,7 @@ fn parse_obus(
                 }
                 v
             };
-            if std::env::var("TDBG").is_ok() {
+            if crate::envflag::is_set("TDBG") {
                 crate::dlog!("[TDBG] n_tiles={n_tiles} n_bytes={} slices={:?} total={tile_data_len}", tinfo.n_bytes, tile_slices.iter().map(|&(o, l)| (o - tile_off, l)).collect::<Vec<_>>());
             }
 
@@ -3097,7 +3097,7 @@ fn parse_obus(
                         };
                         let inh_flag = inherited.is_some();
                         let c = inherited.unwrap_or_else(|| crate::cdf_av2::default_cdf_context(yac, crate::av2_recon::SEQ_REDUCED_TX_PART.with(|c| c.get()) as usize));
-                        if std::env::var("MCDF").is_ok() {
+                        if crate::envflag::is_set("MCDF") {
                             crate::dlog!("[MCDF] part_split[0][12]={:?} rt[0][24]={:?} ext[0][12]={:?} pal_y={:?}", c.m.part_split[0][12], c.m.part_dir[0][24], c.m.part_ext[0][12], c.m.pal_y);
                             crate::dlog!("[MCDF] yac={yac} p_ref={p_ref} s_ref={s_ref} use_pri_sec={use_pri_sec} inherited={inh_flag} eob_bin_32[1]={:?} skip[1][1][0]={:?} tip_drl0={:?}",
                                 c.coef.eob_bin_32[1], c.coef.skip[1][1][0], c.m.tip_drl_idx[0]);
@@ -3149,11 +3149,11 @@ fn parse_obus(
                     let primary_slot = crate::av2_recon::CUR_FRAME_REFIDX.with(|c| c.get().1[0]) as usize;
                     if !crate::av2_frame::load_ref_frame1_from_slot(primary_slot)
                         && !crate::av2_frame::load_ref_frame1_from_stash()
-                        && std::env::var("DAVCAP").is_ok()
+                        && crate::envflag::is_set("DAVCAP")
                     {
                         crate::av2_frame::load_ref_frame1(&crate::av2_recon::cap_path("dav_filtered.yuv"), 432, 240);
                     }
-                    if std::env::var("DAVCAP").is_ok() {
+                    if crate::envflag::is_set("DAVCAP") {
                     if let Ok(b) = std::fs::read(&crate::av2_recon::cap_path("dav_f2pred.yuv")) {
                         if b.len() >= 432 * 240 {
                             let mut p = crate::av2_frame::Plane::alloc(432, 240);
@@ -3256,7 +3256,7 @@ fn parse_obus(
                                             root_bs, bx_sb, by_sb, f2iw4, f2ih4, false, &mut ldm, root_bs as i32, bx_sb, by_sb,
                                             &mut left_cdef, &mut left_ccso,
                                         );
-                                        if std::env::var("MSBT").is_ok() {
+                                        if crate::envflag::is_set("MSBT") {
                                             crate::dlog!("[MSBT] mi=({bx_sb},{by_sb}) rng={} cnt={}", msac_t.rng, msac_t.cnt);
                                         }
                                     }
@@ -3274,7 +3274,7 @@ fn parse_obus(
                         // Temporal projection for this SB row (dav load_tmvs per sbrow).
                         crate::av2_refmvs::load_tmvs((by_sb >> 1) as i32, ((by_sb + sbst) >> 1) as i32);
                         crate::av2_refmvs::tpl_dump_window((by_sb >> 1) as i32, ((by_sb + sbst) >> 1) as i32);
-                        if std::env::var("TMVSDBG").map_or(false, |v| v == format!("{}", crate::av2_recon::CUR_FRAME_REF.with(|c| c.get().0))) {
+                        if crate::envflag::get("TMVSDBG").map_or(false, |v| v == format!("{}", crate::av2_recon::CUR_FRAME_REF.with(|c| c.get().0))) {
                             crate::av2_refmvs::tmvs_dump((by_sb >> 1) as i32, ((by_sb + 16) >> 1) as i32);
                         }
                         // dav2d tile_sbrow_init: reset refmv+warp bank size/idx to 0 at each SB-row
@@ -3302,7 +3302,7 @@ fn parse_obus(
                                 root_bs, bx_sb, by_sb, f2iw4, f2ih4, false, &mut ldm, root_bs as i32, bx_sb, by_sb,
                                 &mut left_cdef, &mut left_ccso,
                             );
-                            if std::env::var("MSBT").is_ok() {
+                            if crate::envflag::is_set("MSBT") {
                                 crate::dlog!("[MSBT] mi=({bx_sb},{by_sb}) rng={} cnt={}", msac_sb.rng, msac_sb.cnt);
                             }
                         }
@@ -3358,7 +3358,7 @@ fn parse_obus(
                                 crate::dlog!("[IFRAMEY] frame-2 assembled LUMA vs dav2d pre-filter recon: {ok}/{tot} px bit-exact ({:.2}%); miss: {unwritten} unwritten(mine=0) + {wrong} wrong; first-wrong={first_wrong:?}", 100.0 * ok as f64 / tot as f64);
                                 crate::dlog!("[IFRAMEY] miss by block-type: untagged={} inter={} intra={} intrabc={} bawp={}; first-unwritten(x,y,btype)={first_unwritten:?}", miss_by_type[0], miss_by_type[1], miss_by_type[2], miss_by_type[3], miss_by_type[4]);
                                 crate::dlog!("[IFRAMEY] UNWRITTEN by block-type: untagged={} inter={} intra={} intrabc={} bawp={}; first-untagged-unwr={first_untag_unwr:?} first-intra-unwr={first_intra_unwr:?}", unwritten_by_type[0], unwritten_by_type[1], unwritten_by_type[2], unwritten_by_type[3], unwritten_by_type[4]);
-                                if std::env::var("BRDBG").is_ok() {
+                                if crate::envflag::is_set("BRDBG") {
                                     // Dump the bottom-right SB region: mine vs dav, every 4th pixel, rows 200..240 cols 380..432.
                                     let st = f.pl[0].stride;
                                     for y in (200..240).step_by(4) {
@@ -3401,7 +3401,7 @@ fn parse_obus(
                 // vs dav's frame-2 this-stage. Isolates which filter's params are wrong. =====
                 // DAVCAP: dav2d capture-file oracles (filter stage isolation). Plain runs
                 // skip them — stale captures poisoned live debugging twice (see memory).
-                if std::env::var("DAVCAP").is_ok() {
+                if crate::envflag::is_set("DAVCAP") {
                 crate::dlog!("--- FRAME-2 filter stage isolation ---");
                 crate::av2_frame::dump_frame2_luma_wmap(&crate::av2_recon::cap_path("mine_f2wmap.bin"));
                 // Same-run oracle: pre-deblock recon → post-deblock (both from dav's normal decode,
@@ -3432,7 +3432,7 @@ fn parse_obus(
                 // ISOLATION TEST: overwrite FRAME with dav's CORRECT pre-filter recon so [IFILT]
                 // measures the FILTERS alone (independent of mine's 91% recon). Remove to measure
                 // the real end-to-end output.
-                if std::env::var("FILT_ISO").is_ok() {
+                if crate::envflag::is_set("FILT_ISO") {
                     if let (Ok(rl), Ok(rc)) = (std::fs::read(&crate::av2_recon::cap_path("dav_f2recon.yuv")), std::fs::read(&crate::av2_recon::cap_path("dav_f2reconc.yuv"))) {
                         crate::av2_frame::FRAME.with(|fr| {
                             let mut f = fr.borrow_mut();
@@ -3442,7 +3442,7 @@ fn parse_obus(
                     }
                 }
                 // env OH1PRE: dump this frame's PRE-FILTER recon when it's the oh=1 frame.
-                if std::env::var("OH1PRE").is_ok() {
+                if crate::envflag::is_set("OH1PRE") {
                     crate::av2_frame::FRAME.with(|fr| {
                         let f = fr.borrow();
                         let mut out = Vec::new();
@@ -3472,7 +3472,7 @@ fn parse_obus(
                     TBL[(max_dist as usize).min(11)]
                 };
                 crate::av2_frame::filter_frame_chain(gdf_rd); // frame-2 inter single-ref dist-1 → inter GDF tables
-                if std::env::var("DAVCAP").is_ok() {
+                if crate::envflag::is_set("DAVCAP") {
                 if let Ok(b) = std::fs::read(&crate::av2_recon::cap_path("dav_out.yuv")) {
                     let fsz = 432 * 240 + 2 * 216 * 120; // 155520 bytes/frame
                     if b.len() >= 2 * fsz {
@@ -3615,7 +3615,7 @@ fn parse_obus(
                 // this stream's recon (golden). For any other stream it feeds STALE golden pixels →
                 // wrong prediction. DEFAULT = self-referential (read mine's own FRAME); env ISOLATE
                 // re-enables the crutch for golden-only per-block bring-up scoring.
-                if std::env::var("ISOLATE").is_ok() {
+                if crate::envflag::is_set("ISOLATE") {
                     crate::av2_frame::load_ref_luma(&crate::av2_recon::cap_path("dav_f1luma.bin"), fw, fh);
                     crate::av2_frame::load_ref_chroma(
                         &crate::av2_recon::cap_path("dav_lf_none.yuv"),
@@ -3694,7 +3694,7 @@ fn parse_obus(
                                     crate::av2_recon::decode_sb_key(
                                         &mut sbt, &mut uv_a_t, &mut uv_l_t, &mut uv_nb_t, root_bs_t, bx_sb, by_sb,
                                     );
-                                    if std::env::var("MSBT").is_ok() {
+                                    if crate::envflag::is_set("MSBT") {
                                         crate::dlog!("[MSBT] mi=({bx_sb},{by_sb}) rng={} cnt={}", sbt.msac.rng, sbt.msac.cnt);
                                     }
                                 }
@@ -3729,7 +3729,7 @@ fn parse_obus(
                         crate::av2_recon::decode_sb_key(
                             &mut sb, &mut uv_a, &mut uv_l, &mut uv_nb, root_bs, bx_sb, by_sb,
                         );
-                        if std::env::var("MSBT").is_ok() {
+                        if crate::envflag::is_set("MSBT") {
                             crate::dlog!("[MSBT] mi=({bx_sb},{by_sb}) rng={} cnt={}", sb.msac.rng, sb.msac.cnt);
                         }
                     }
@@ -3756,7 +3756,7 @@ fn parse_obus(
                 FRAME1_ADAPTED_CDF.with(|cell| cell.set(Some(adapted)));
                 // RECON: dump the reconstructed luma plane (pre-loop-filter) for verification.
                 // (DAVCAP-gated: capture-oracle scaffolding, off in plain runs.)
-                if std::env::var("DAVCAP").is_ok() {
+                if crate::envflag::is_set("DAVCAP") {
                 crate::av2_frame::FRAME.with(|fr| {
                     let f = fr.borrow();
                     let p = &f.pl[0];
@@ -3780,7 +3780,7 @@ fn parse_obus(
                                 if m == d { ok += 1; } else { wrong += 1; if m == 0 { zero += 1; if first_gap.is_none() { first_gap = Some((x,y)); } } else if first_wrong.is_none() { first_wrong = Some((x,y,m,d)); } if first.is_none() { first = Some((x, y, m, d)); } }
                             }}
                             crate::dlog!("[F1ASSEMBLED] f.pl vs dav ref: {ok}/{} ok; {wrong} wrong ({zero} are mine=0=GAP); first_gap={first_gap:?} first_wrong={first_wrong:?}", p.w * p.h);
-                            if std::env::var("F1DUMP").is_ok() {
+                            if crate::envflag::is_set("F1DUMP") {
                                 for (tag, pos) in [("GAP", first_gap.map(|(x,y)|(x,y))), ("WRONG", first_wrong.map(|(x,y,_,_)|(x,y)))] {
                                     if let Some((x0,y0)) = pos {
                                         crate::dlog!("F1DUMP {tag} around ({x0},{y0}):");
@@ -3838,7 +3838,7 @@ fn parse_obus(
                 // PRE-FILTER recon oracle: compare mine's f.pl (before any loop filter) to dav's
                 // keyframe pre-filter recon (f->cur.p.data, what intrabc/intra prediction reads).
                 // Isolates a RECON ±1 from a FILTER ±1 and cuts through the intrabc copy-chain.
-                if let Some(b) = std::fs::read(&crate::av2_recon::cap_path("dav_f1prefilter.yuv")).ok().filter(|_| std::env::var("DAVCAP").is_ok()) {
+                if let Some(b) = std::fs::read(&crate::av2_recon::cap_path("dav_f1prefilter.yuv")).ok().filter(|_| crate::envflag::is_set("DAVCAP")) {
                     crate::av2_frame::FRAME.with(|fr| {
                         let f = fr.borrow();
                         for (pl, (pw, ph, off)) in [(432usize, 240usize, 0usize), (216, 120, 432 * 240), (216, 120, 432 * 240 + 216 * 120)].into_iter().enumerate() {
@@ -3860,7 +3860,7 @@ fn parse_obus(
                 // assembled (byte-exact) frame-1 FRAME buffer, compare vs dav2d's frame-1 decoded
                 // (post-filter) output = the FIRST frame in dav_out.yuv. =====
                 // env OH1PRE: dump the KEY's pre-filter recon (file oh 99, matching dav's PF1).
-                if std::env::var("OH1PRE").is_ok() {
+                if crate::envflag::is_set("OH1PRE") {
                     crate::av2_frame::FRAME.with(|fr| {
                         let f = fr.borrow();
                         let mut out = Vec::new();
@@ -3876,7 +3876,7 @@ fn parse_obus(
                     });
                 }
                 crate::av2_frame::filter_frame_chain(0); // frame-1 keyframe → intra GDF tables
-                if let Some(b) = std::fs::read(&crate::av2_recon::cap_path("dav_out.yuv")).ok().filter(|_| std::env::var("DAVCAP").is_ok()) {
+                if let Some(b) = std::fs::read(&crate::av2_recon::cap_path("dav_out.yuv")).ok().filter(|_| crate::envflag::is_set("DAVCAP")) {
                     let fsz = 432 * 240 + 2 * 216 * 120;
                     if b.len() >= fsz {
                         let f1 = &b[0..fsz];
@@ -4111,7 +4111,7 @@ fn parse_obus(
                     fgd.mc_identity = gb.get_bit();
                 }
                 fgd.block_size = gb.get_bit() as i32;
-                if std::env::var("FGMDBG").is_ok() {
+                if crate::envflag::is_set("FGMDBG") {
                     crate::dlog!("[FGM] id={idx} csfl={} np={:?} pts0={:?} pts1={:?} pts2={:?} ssh={} lag={} arsh={} gss={} uvm={:?} uvlm={:?} uvo={:?} ovl={} clip={} mcid={} bs={}",
                         fgd.chroma_scaling_from_luma as u8, fgd.num_points,
                         &fgd.points[0][..fgd.num_points[0]], &fgd.points[1][..fgd.num_points[1]],
