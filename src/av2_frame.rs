@@ -1782,7 +1782,14 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
         let mut out: Vec<u8> = Vec::with_capacity(w * h * 3 / 2);
         for (p, stride, pw, ph) in [(&pl0, w, vw, vh), (&pl1, cw, vcw, vch), (&pl2, cw, vcw, vch)] {
-            out.extend(crop_plane(p, stride, pw, ph).iter().map(|v| (*v).clamp(0, 255) as u8));
+            // 16-bit little-endian at high bit depth, matching avmdec's dumps.
+            for v in crop_plane(p, stride, pw, ph) {
+                if bdmax > 255 {
+                    out.extend_from_slice(&(v.clamp(0, bdmax) as u16).to_le_bytes());
+                } else {
+                    out.push(v.clamp(0, 255) as u8);
+                }
+            }
         }
         let _ = std::fs::write(format!("{path}_{n}.yuv"), &out);
     }
@@ -2174,7 +2181,14 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
         let mut out: Vec<u8> = Vec::with_capacity(w * h * 3 / 2);
         for (p, stride, pw, ph) in [(&pl0, w, vw, vh), (&pl1, cw, vcw, vch), (&pl2, cw, vcw, vch)] {
-            out.extend(crop_plane(p, stride, pw, ph).iter().map(|v| (*v).clamp(0, 255) as u8));
+            // 16-bit little-endian at high bit depth, matching avmdec's dumps.
+            for v in crop_plane(p, stride, pw, ph) {
+                if bdmax > 255 {
+                    out.extend_from_slice(&(v.clamp(0, bdmax) as u16).to_le_bytes());
+                } else {
+                    out.push(v.clamp(0, 255) as u8);
+                }
+            }
         }
         let _ = std::fs::write((crate::av2_recon::cap_path(&format!("mine_fin_{n}.yuv"))), &out);
     }
