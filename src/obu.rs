@@ -2592,7 +2592,7 @@ pub(crate) fn av2_queue_flush() {
     order.dedup_by_key(|&mut (_, poc)| poc);
     for &(n, _) in &order {
         if let Some(p) = crate::av2_frame::REF_PICS.with(|rp| rp.borrow()[n].clone()) {
-            let mut p = crate::av2_frame::visible_planes(p);
+            let mut p = crate::av2_frame::visible_planes(p.map(|x| std::rc::Rc::unwrap_or_clone(x)));
             if let Some((id, seed)) = crate::av2_grain::GRAIN_SLOTS.with(|g| g.borrow()[n]) {
                 crate::av2_grain::apply_grain_to_planes(&mut p, id, seed);
             }
@@ -2649,7 +2649,7 @@ fn emit_av2_output(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult<()> 
         }
         picked[cand] = true;
         if let Some(p) = crate::av2_frame::REF_PICS.with(|rp| rp.borrow()[cand].clone()) {
-            let mut p = crate::av2_frame::visible_planes(p);
+            let mut p = crate::av2_frame::visible_planes(p.map(|x| std::rc::Rc::unwrap_or_clone(x)));
             if let Some((id, seed)) = crate::av2_grain::GRAIN_SLOTS.with(|g| g.borrow()[cand]) {
                 crate::av2_grain::apply_grain_to_planes(&mut p, id, seed);
             }
@@ -2691,7 +2691,7 @@ fn emit_av2_output(c: &Rav1dContext, state: &mut Rav1dState) -> Rav1dResult<()> 
         }
         picked[found] = true;
         if let Some(p) = crate::av2_frame::REF_PICS.with(|rp| rp.borrow()[found].clone()) {
-            let mut p = crate::av2_frame::visible_planes(p);
+            let mut p = crate::av2_frame::visible_planes(p.map(|x| std::rc::Rc::unwrap_or_clone(x)));
             dpb = slots[found].as_ref().unwrap().order_hint;
             if let Some((id, seed)) = crate::av2_grain::GRAIN_SLOTS.with(|g| g.borrow()[found]) {
                 crate::av2_grain::apply_grain_to_planes(&mut p, id, seed);

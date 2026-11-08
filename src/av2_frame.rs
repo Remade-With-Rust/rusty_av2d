@@ -6,6 +6,7 @@
 //! (already bit-exact) entropy parse — it only consumes the parsed coefficients + mode.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 /// One reconstructed plane: `stride`-major `u16` samples (docs/plan.md Phase 1
 /// item 1 — samples were `i32`, which was 2–4× the memory traffic the data
@@ -573,14 +574,16 @@ thread_local! {
 
     /// Stage D: frame-1 reconstructed+FILTERED output planes [Y, U, V] — the inter-prediction
     /// reference (dav2d `f->refp[0]`). Loaded from the normal (filtered) dav2d frame-1 output.
-    pub static REF_FRAME1: RefCell<[Option<Plane>; 3]> = const { RefCell::new([None, None, None]) };
+    /// Shared with REF_PICS: reference planes are never written after they are stored, so
+    /// switching the loaded reference is three refcount bumps, not three plane copies.
+    pub static REF_FRAME1: RefCell<[Option<Rc<Plane>>; 3]> = const { RefCell::new([None, None, None]) };
     /// Mine's OWN just-decoded + fully-filtered frame-1 planes, stashed to serve as the inter
     /// frame's reference — a true standalone decode with no external reference file.
-    pub static STASH_FRAME1: RefCell<[Option<Plane>; 3]> = const { RefCell::new([None, None, None]) };
+    pub static STASH_FRAME1: RefCell<[Option<Rc<Plane>>; 3]> = const { RefCell::new([None, None, None]) };
     /// The 8-slot reference-PICTURE buffer (dav2d `c->refs[i].p`): each decoded+filtered frame's
     /// [Y,U,V] planes, written into every slot selected by refresh_frame_flags. Parallel to the
     /// REF_SLOTS metadata. The compound/multi-ref MC indexes this by `refidx[ref]`.
-    pub static REF_PICS: RefCell<[Option<[Plane; 3]>; 8]> =
+    pub static REF_PICS: RefCell<[Option<[Rc<Plane>; 3]>; 8]> =
         const { RefCell::new([None, None, None, None, None, None, None, None]) };
     /// Stage D inter-recon scoreboard: (#luma blocks bit-exact vs REF, #luma blocks total).
     pub static INTER_SCORE: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
@@ -704,7 +707,7 @@ pub fn load_ref_frame1(path: &str, w: usize, h: usize) {
                 pu.px[i] = bytes[luma_sz + i] as u16;
                 pv.px[i] = bytes[luma_sz + csz + i] as u16;
             }
-            REF_FRAME1.with(|r| *r.borrow_mut() = [Some(py), Some(pu), Some(pv)]);
+            REF_FRAME1.with(|r| *r.borrow_mut() = [Some(Rc::new(py)), Some(Rc::new(pu)), Some(Rc::new(pv))]);
             INTER_SCORE.with(|s| s.set((0, 0)));
         }
     }
@@ -725,8 +728,8 @@ pub fn reset_stream_state() {
 pub fn stash_decoded_frame1() {
     FRAME.with(|fr| {
         let f = fr.borrow();
-        let planes: [Option<Plane>; 3] =
-            std::array::from_fn(|i| if f.pl[i].w == 0 { None } else { Some(f.pl[i].clone()) });
+        let planes: [Option<Rc<Plane>>; 3] =
+            std::array::from_fn(|i| if f.pl[i].w == 0 { None } else { Some(Rc::new(f.pl[i].clone())) });
         STASH_FRAME1.with(|s| *s.borrow_mut() = planes);
     });
     // MREFDUMP=<prefix>: write each decoded frame's final recon (decode order) as
@@ -769,7 +772,8 @@ pub fn update_ref_pics(refresh: u32) {
         if f.pl[0].w == 0 {
             return;
         }
-        let planes: [Plane; 3] = std::array::from_fn(|i| f.pl[i].clone());
+        // One copy of the frame, shared by every refreshed slot.
+        let planes: [Rc<Plane>; 3] = std::array::from_fn(|i| Rc::new(f.pl[i].clone()));
         REF_PICS.with(|r| {
             let mut slots = r.borrow_mut();
             for i in 0..8 {
