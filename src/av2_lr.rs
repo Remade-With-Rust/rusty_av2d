@@ -219,6 +219,8 @@ pub fn lr_filter_luma(
     };
 
     let mut out_rows: Vec<i32> = vec![0; w]; // scratch per row
+    // The (stripe x strip) neighbourhood, prefetched through `px` (see `WIN_R`).
+    let mut win: Vec<i32> = Vec::new();
 
     // Iterate stripes × 64-col strips (the strip only matters for classification's
     // noskip-window clamp — pixel access is global thanks to the snapshot).
@@ -270,6 +272,19 @@ pub fn lr_filter_luma(
             }
             // With frame filters off each unit codes its own (see LR_UNIT_FILTERS).
             let ns_filters = if pd.ffon { &pd.filter } else { unit_filters.get(&(0u8, ax, ay)).unwrap_or(&pd.filter) };
+            // `px` is a pure function of (x, y) within the stripe, so fetch the strip's
+            // neighbourhood once: the filter reaches 4 samples out and the classifier's 6x6
+            // gradient window up to 5, and WIN_R covers both. The taps then index `win` directly.
+            const WIN_R: usize = 8;
+            let (wx0, wy0) = (x0 as i32 - WIN_R as i32, sy0 as i32 - WIN_R as i32);
+            let (ww, wh) = (sw + 2 * WIN_R, sy1 - sy0 + 2 * WIN_R);
+            win.clear();
+            for yy in 0..wh as i32 {
+                for xx in 0..ww as i32 {
+                    win.push(px(wx0 + xx, wy0 + yy));
+                }
+            }
+            let px = |x: i32, y: i32| -> i32 { win[(y - wy0) as usize * ww + (x - wx0) as usize] };
             // classification (PC-wiener or multi-class NS): per 4px block of the strip.
             let multi = u_type == REST_PC || (u_type == REST_NS && pd.num_classes > 1);
             let bh_blk = (sy1 - sy0).div_ceil(4);
