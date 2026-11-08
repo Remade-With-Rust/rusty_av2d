@@ -279,52 +279,60 @@ fn inference(
     let mut lap_row = 0usize; // in u32 units, advances by lap_y_stride per 2 output rows
     let mut cls_col_row = 0usize; // cls advances by cls_stride per 2 output rows
     let _ = lap_cls_height;
-    // gdf_idx[j][idx]: one accumulator row, cleared per output row.
+    // gdf_idx[j][idx]: one accumulator row, cleared per output row; cls_j[j]: the row's class
+    // per sample (it depends on j only, so it is read once per row rather than once per tap).
     let mut gdf_idx = vec![[0i32; LUT_IDX_NUM]; blk_width];
+    let mut cls_j = vec![0usize; blk_width];
+    let inp_lim = 1 << (GDF_TEST_INP_PREC - 1);
+    // Each sample's taps accumulate in k order; the k loops are split by tap kind (reconstructed
+    // neighbour pairs, then gradients) and the LUT step runs after all taps, which is the same
+    // per-sample sum.
+    let acc = |gdf_idx: &mut [i32; LUT_IDX_NUM], cls_offset: usize, gdf_inp: i32| {
+        let gdf_inp = clip(gdf_inp, -inp_lim, inp_lim - 1);
+        // A constant trip count: the row loop's tick bounds this walk.
+        for (idx, g) in gdf_idx.iter_mut().enumerate() {
+            *g += gdf_inp * weight[cls_offset + (INP_TOT * CLS_NUM) * idx] as i32;
+        }
+    };
     for i in 0..blk_height {
         if !crate::av2_recon::work_tick("gdf:275") { break; }
         let rec_ptr = recbase as isize + (i as isize) * s;
         gdf_idx.fill([0; LUT_IDX_NUM]);
-        for k in 0..INP_TOT {
-            let (fy, fx, by, bx) = if k < INP_REC_NUM {
-                (FWD[k][0], FWD[k][1], BWD[k][0], BWD[k][1])
-            } else {
-                (0, 0, 0, 0)
-            };
+        for (j, c) in cls_j.iter_mut().enumerate() {
+            *c = cls[cls_col_row + (j >> 1)] as usize;
+        }
+        for k in 0..INP_REC_NUM {
+            let fo = FWD[k][0] as isize * s + FWD[k][1] as isize;
+            let bo = BWD[k][0] as isize * s + BWD[k][1] as isize;
             for j in 0..blk_width {
-                let cls_idx = cls[cls_col_row + (j >> 1)] as usize;
-                let cls_offset = k * CLS_NUM + cls_idx;
-                let center = rec[(rec_ptr + j as isize) as usize];
-                let inp_value = if k < INP_REC_NUM {
-                    let fwd = rec[(rec_ptr + (fy as isize * s + fx as isize) + j as isize) as usize];
-                    (fwd - center) * (1 << pxl_shift)
-                } else {
-                    let grd = (lap[k - INP_REC_NUM][lap_row + (j >> 1)] & 0xffff) as i32;
-                    (grd << pxl_shift) >> GRD_SHIFT
-                };
+                let cls_offset = k * CLS_NUM + cls_j[j];
+                let p = rec_ptr + j as isize;
+                let center = rec[p as usize];
                 let a = alpha[cls_offset] as i32;
-                let mut gdf_inp = clip(inp_value, -a, a);
-                if k < INP_REC_NUM {
-                    let bwd = rec[(rec_ptr + (by as isize * s + bx as isize) + j as isize) as usize];
-                    let inp2 = (bwd - center) * (1 << pxl_shift);
-                    gdf_inp += clip(inp2, -a, a);
-                }
-                gdf_inp = clip(gdf_inp, -(1 << (GDF_TEST_INP_PREC - 1)), (1 << (GDF_TEST_INP_PREC - 1)) - 1);
-                // A constant trip count: the row loop's tick bounds this walk.
-                for idx in 0..LUT_IDX_NUM {
-                    let w = weight[cls_offset + (INP_TOT * CLS_NUM) * idx] as i32;
-                    gdf_idx[j][idx] += gdf_inp * w;
-                }
-                if k == INP_TOT - 1 {
-                    let mut tb = 0i32; // offset into gdftable
-                    for idx in 0..LUT_IDX_NUM {
-                        gdf_idx[j][idx] += bias[cls_idx + CLS_NUM * idx];
-                        let ti = norm(gdf_idx[j][idx]);
-                        tb += clip(ti, 0, gdf_frm_max - 1) * idx_offset[idx];
-                    }
-                    err[i * err_stride + j] = gdftable[tb as usize] as i32;
-                }
+                let fwd = rec[(p + fo) as usize];
+                let bwd = rec[(p + bo) as usize];
+                let gdf_inp = clip((fwd - center) * (1 << pxl_shift), -a, a) + clip((bwd - center) * (1 << pxl_shift), -a, a);
+                acc(&mut gdf_idx[j], cls_offset, gdf_inp);
             }
+        }
+        for k in INP_REC_NUM..INP_TOT {
+            let lap_k = &lap[k - INP_REC_NUM];
+            for j in 0..blk_width {
+                let cls_offset = k * CLS_NUM + cls_j[j];
+                let grd = (lap_k[lap_row + (j >> 1)] & 0xffff) as i32;
+                let a = alpha[cls_offset] as i32;
+                acc(&mut gdf_idx[j], cls_offset, clip((grd << pxl_shift) >> GRD_SHIFT, -a, a));
+            }
+        }
+        for j in 0..blk_width {
+            let cls_idx = cls_j[j];
+            let mut tb = 0i32; // offset into gdftable
+            for idx in 0..LUT_IDX_NUM {
+                gdf_idx[j][idx] += bias[cls_idx + CLS_NUM * idx];
+                let ti = norm(gdf_idx[j][idx]);
+                tb += clip(ti, 0, gdf_frm_max - 1) * idx_offset[idx];
+            }
+            err[i * err_stride + j] = gdftable[tb as usize] as i32;
         }
         if i & 1 == 1 {
             cls_col_row += cls_stride;
