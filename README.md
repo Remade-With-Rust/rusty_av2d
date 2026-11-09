@@ -56,11 +56,38 @@ Eleven of the clips are single-tool-disabled controls: each one turns off
 exactly one sequence-header tool, verifying that the gate for that tool is
 honored in *both* directions.
 
+## Performance
+
+0.3.0 decodes **2.7–3.8× faster** than 0.2.13, with byte-identical output:
+
+| Clip (432×240, single thread) | 0.2.13 | 0.3.0 | Speedup | Instructions |
+|---|---|---|---|---|
+| `v432_16f_q128`, 16 frames | 903 ms | 233 ms | **3.84×** | 6.83G → 2.95G (2.31× fewer) |
+| `v432_8f_sb128cdef`, 8 frames | 253 ms | 95 ms | **2.66×** | 1.69G → 0.82G (2.06× fewer) |
+
+Times are the fastest of 10 runs per binary, pinned to one core at high
+priority, the two binaries alternating, output MD5 checked on every run; the
+newer binary won all 10 pairs on both clips, and a same-binary control pair
+differed by under 1%. Windows 11, x86-64, process start included. Instruction
+counts are callgrind totals for the same decodes (Linux, same clips), which
+don't vary run to run.
+
+Where it came from: the AVX2/NEON motion-compensation kernels now cover every
+fixed-filter 8-tap sample (12.8% did before); reference frames are shared
+rather than copied on every reference switch; loop restoration reads a
+prefetched window instead of fetching each filter tap through a clamping
+accessor; scratch buffers are reused rather than zeroed per call; and the
+diagnostic probes and corrupt-stream guards no longer cost anything on hot
+paths. Both clips are ones 0.2.13 already decoded correctly, so the two
+versions do the same work; on real `avmenc` streams 0.2.13's output was wrong
+([issue #14](https://github.com/Remade-With-Rust/rusty_av2d/issues/14)), so
+there is no like-for-like comparison there.
+
 ## Install
 
 ```toml
 [dependencies]
-rusty_av2d = "0.2"
+rusty_av2d = "0.3"
 ```
 
 https://crates.io/crates/rusty_av2d
@@ -148,7 +175,7 @@ Those symbol names are inherited from the dav1d lineage, which means they
 features off:
 
 ```toml
-rusty_av2d = { version = "0.2", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+rusty_av2d = { version = "0.3", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 ```
 
 That drops the C ABI, leaving no unmangled symbols. The safe Rust API is unaffected either way — this is exactly how
@@ -162,15 +189,13 @@ These are real, and you should read them before building on this.
 1. **AV2 is not a finalized standard.** There are no official conformance
    vectors. "Correct" here means bit-exact against AVM as of this commit — the
    bitstream itself may still change under us.
-2. **Performance is young.** Correctness came first. The hot paths now run
-   restructured slice loops with an interior/edge split (motion compensation
-   measured 19–47% faster whole-decode from that alone) plus runtime-dispatched
-   AVX2/NEON kernels for the MC taps and compound blends — byte-identical,
-   scalar-twin-tested, `RUSTY_AV2D_NOSIMD=1` opts out. Samples are still
-   one-per-`i32`, which caps the vector width; the narrowing to `u8`/`u16` is
-   the next planned lever. Do not benchmark this against `libavm` and expect a
-   fair fight yet. [`docs/plan.md`](docs/plan.md) has the measured profile and
-   what remains.
+2. **Performance is still young.** Correctness came first, and 0.3.0 is
+   2.7–3.8× faster than 0.2.13 ([Performance](#performance)). Motion
+   compensation runs runtime-dispatched AVX2/NEON kernels (byte-identical,
+   scalar-twin-tested, `RUSTY_AV2D_NOSIMD=1` opts out); the in-loop filters
+   (GDF, loop restoration, CDEF) are still scalar and now lead the profile.
+   Do not benchmark this against `libavm` and expect a fair fight yet.
+   [`docs/plan.md`](docs/plan.md) has the measured profile and what remains.
 3. **Research-grade internals.** The AV2 path uses thread-local state rather
    than the upstream pipeline structure, and retains in-tree diagnostic probes
    (silent unless `RUSTY_AV2D_DEBUG=1`).
