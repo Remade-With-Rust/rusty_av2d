@@ -474,7 +474,7 @@ pub fn stash_cdf(cdf: &CdfContext, refresh: u32, is_key_or_intra: bool) {
     // dav2d dav2d_cdf_reset_count: ALWAYS applied before save; key/intra frames reset only the
     // intra/coef/dmv sections (the walk's between_kf_nonkf early-return), inter frames everything.
     reset_cdf_count(&mut out, is_key_or_intra);
-    if std::env::var("MCDF").is_ok() {
+    if crate::env_is_set!("MCDF") {
         eprintln!("[MSTASH] refresh={refresh:#x} key={is_key_or_intra} eob_bin_32[1]={:?} skip[1][1][0]={:?}",
             out.coef.eob_bin_32[1], out.coef.skip[1][1][0]);
         eprintln!("[MSTASH2] eob32_0={:?} eob16_1={:?} eob64_1={:?} imode0={:?} skiptx1={:?}",

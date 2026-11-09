@@ -329,6 +329,25 @@ const TX_SHIFT: [[[u32; 2]; 5]; 5] = [
 /// `inv_txfm_add_c`.
 pub fn inv_txfm_2d(coeff: &[i32], lw: usize, lh: usize, row_ty: usize, col_ty: usize, out: &mut [i32]) {
     crate::prof_scope!(4);
+    ITX_TMP.with_borrow_mut(|tmp| inv_txfm_2d_in(coeff, lw, lh, row_ty, col_ty, out, tmp));
+}
+
+thread_local! {
+    /// `inv_txfm_2d`'s intermediate. The row pass writes all `sw * sh` samples before anything
+    /// reads them, so the buffer is reused as is: a fresh zeroed array cost a 4 KB memset per
+    /// transform, most of them 4x4.
+    static ITX_TMP: std::cell::RefCell<[i32; 32 * 32]> = const { std::cell::RefCell::new([0; 32 * 32]) };
+}
+
+fn inv_txfm_2d_in(
+    coeff: &[i32],
+    lw: usize,
+    lh: usize,
+    row_ty: usize,
+    col_ty: usize,
+    out: &mut [i32],
+    tmp: &mut [i32; 32 * 32],
+) {
     let w = 4usize << lw;
     let h = 4usize << lh;
     let sw = w.min(32);
@@ -341,7 +360,6 @@ pub fn inv_txfm_2d(coeff: &[i32], lw: usize, lh: usize, row_ty: usize, col_ty: u
     let row_fn = tx1d_fn(lw, row_ty); // width transform (lsize 4 → dct32)
     let col_fn = tx1d_fn(lh, col_ty); // height transform
 
-    let mut tmp = [0i32; 32 * 32];
     // row pass: gather a row (stride sh), rect-scale, transform in place
     for col in 0..sh {
         if !crate::av2_recon::work_tick("av2_itx:341") { break; }

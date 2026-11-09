@@ -142,6 +142,7 @@ mod const_fn;
 pub mod cpu;
 pub mod prof;
 pub mod scratch;
+pub(crate) mod envflag;
 pub mod simd;
 mod ctx;
 mod cursor;

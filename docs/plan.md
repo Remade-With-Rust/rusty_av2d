@@ -122,6 +122,9 @@ outputs are byte-identical. A live vector path would not be invisible.
 
 ### There is no SIMD either
 
+*Superseded: this describes the tree before Phase 2. `src/simd.rs` now holds the MC and blend
+kernels, per the status section above.*
+
 Zero uses of `std::arch`, `core::arch`, `_mm*`, NEON intrinsics, `target_feature`,
 or portable SIMD anywhere in the AV2 modules. The only file in the crate touching
 `core::arch` is `cpu.rs`, and that is CPU feature *detection* — retained because

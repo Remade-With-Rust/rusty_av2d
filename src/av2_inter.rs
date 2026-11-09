@@ -102,6 +102,98 @@ thread_local! {
     /// Reusable H-pass intermediate for the 2D MC path (docs/plan.md Phase 1: MC used to
     /// allocate this on every one of ~40k calls per clip).
     static MC_MID: std::cell::RefCell<Vec<i32>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Reusable edge-extended source rows for [`fir_h_padded`].
+    static MC_PAD: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The rectangle of `rf` a block may read: every sample coordinate clamps into it.
+#[derive(Clone, Copy)]
+struct ReadWin {
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+}
+
+impl ReadWin {
+    #[inline]
+    fn sample(&self, rf: &Plane, x: i32, y: i32) -> i32 {
+        rf.at(x.clamp(self.x0, self.x1) as usize, y.clamp(self.y0, self.y1) as usize)
+    }
+}
+
+/// 8-tap horizontal filter of `rows` rows from `(x, y)`: row `r` reads `x - 3 ..= x + w + 3` of
+/// source row `y + r`, written `os` apart into `out`. Rows above or below the window repeat its
+/// edge row, and a block reaching past its left or right edge is edge-extended first, so every
+/// row runs the kernel and each run of rows is one kernel call.
+#[allow(clippy::too_many_arguments)]
+fn fir_h_block(
+    rf: &Plane, win: ReadWin, x: i32, y: i32, taps: &[i8; 8], out: &mut [i32], os: usize, w: usize, rows: usize,
+    rnd: i32, sh: i32, clamp: i32,
+) {
+    let n = w + 7;
+    let first = x - 3;
+    if first < win.x0 || first + n as i32 - 1 > win.x1 {
+        fir_h_padded(rf, win, first, y, taps, out, os, w, rows, rnd, sh, clamp);
+        return;
+    }
+    // Runs of rows sharing one source stride: a clamped run repeats a single row (stride 0).
+    let mut r = 0usize;
+    while r < rows {
+        let yr = y + r as i32;
+        let (cy, run, stride) = if yr < win.y0 {
+            (win.y0, ((win.y0 - yr) as usize).min(rows - r), 0)
+        } else if yr > win.y1 {
+            (win.y1, rows - r, 0)
+        } else {
+            (yr, ((win.y1 - yr + 1) as usize).min(rows - r), rf.stride)
+        };
+        let base = cy as usize * rf.stride + first as usize;
+        let out_run = &mut out[r * os..];
+        match rf.px.get(base..base + (run - 1) * stride + n) {
+            Some(src) => crate::simd::fir8_h_u16(src, stride, taps, out_run, os, w, run, rnd, sh, clamp),
+            // HARDENING: a plane shorter than its stated size reads as edge-extended samples.
+            None => fir_h_padded(rf, win, first, yr, taps, out_run, os, w, run, rnd, sh, clamp),
+        }
+        r += run;
+    }
+}
+
+/// [`fir_h_block`] for a block reaching past its window: gathers the clamped samples of every row,
+/// then filters them in one kernel call.
+#[allow(clippy::too_many_arguments)]
+fn fir_h_padded(
+    rf: &Plane, win: ReadWin, first: i32, y: i32, taps: &[i8; 8], out: &mut [i32], os: usize, w: usize, rows: usize,
+    rnd: i32, sh: i32, clamp: i32,
+) {
+    let n = w + 7;
+    MC_PAD.with(|c| {
+        let mut pad = c.borrow_mut();
+        pad.clear();
+        for r in 0..rows {
+            let yr = y + r as i32;
+            pad.extend((0..n as i32).map(|i| win.sample(rf, first + i, yr) as u16));
+        }
+        crate::simd::fir8_h_u16(&pad, n, taps, out, os, w, rows, rnd, sh, clamp);
+    });
+}
+
+/// 8-tap vertical filter of `dst`'s `h` rows from `(x, y - 3)` on, for a block reaching outside the
+/// window: gathers the edge-extended samples into `mid`, then runs the kernel over them.
+#[allow(clippy::too_many_arguments)]
+fn fir_v_extended(
+    rf: &Plane, win: ReadWin, x: i32, y: i32, w: usize, h: usize, taps: &[i8; 8], dst: &mut [i32], dst_w: usize,
+    rnd: i32, sh: i32, clamp: i32,
+) {
+    MC_MID.with(|c| {
+        let mut mid = c.borrow_mut();
+        mid.clear();
+        for yy in 0..h + 7 {
+            let sy = y - 3 + yy as i32;
+            mid.extend((0..w as i32).map(|xx| win.sample(rf, x + xx, sy)));
+        }
+        crate::simd::fir8_v(&mid, w, taps, dst, dst_w, w, h, rnd, sh, clamp);
+    });
 }
 
 /// Shared core of `mc_translate` / `mc_translate_prep` (`prep` selects the output
@@ -122,7 +214,8 @@ fn mc_core(
     let (rw, rh) = (rf.w as i32, rf.h as i32);
     let stride = rf.stride;
     let px = &rf.px[..];
-    let get = |x: i32, y: i32| -> i32 { rf.at(x.clamp(0, rw - 1) as usize, y.clamp(0, rh - 1) as usize) };
+    let win = ReadWin { x0: 0, x1: rw - 1, y0: 0, y1: rh - 1 };
+    let get = |x: i32, y: i32| -> i32 { win.sample(rf, x, y) };
     let mx = (mvx & (15 >> (1 - ss_hor))) << (1 - ss_hor);
     let my = (mvy & (15 >> (1 - ss_ver))) << (1 - ss_ver);
     let dx = px0 as i32 + (mvx >> (3 + ss_hor));
@@ -151,100 +244,34 @@ fn mc_core(
                 }
                 let mid = &mut mid_b[..midh * w];
                 if interior {
-                    for yy in 0..midh {
-                        let base = ((dy - 3 + yy as i32) as usize) * stride + (dx - 3) as usize;
-                        crate::simd::fir8_row_u16(
-                            &px[base..base + w + 7],
-                            fh,
-                            &mut mid[yy * w..yy * w + w],
-                            (1 << h_sh) >> 1,
-                            h_sh,
-                            -1,
-                        );
-                    }
+                    let base = ((dy - 3) as usize) * stride + (dx - 3) as usize;
+                    crate::simd::fir8_h_u16(&px[base..], stride, fh, mid, w, w, midh, (1 << h_sh) >> 1, h_sh, -1);
                 } else {
-                    for yy in 0..midh {
-                        if !crate::av2_recon::work_tick("av2_inter:mc2d_h") { break; }
-                        let sy = dy - 3 + yy as i32;
-                        for xx in 0..w {
-                            let sx = dx + xx as i32;
-                            let s: i32 = (0..8).map(|k| fh[k] as i32 * get(sx + k as i32 - 3, sy)).sum();
-                            mid[yy * w + xx] = (s + ((1 << h_sh) >> 1)) >> h_sh;
-                        }
-                    }
+                    fir_h_block(rf, win, dx, dy - 3, fh, mid, w, w, midh, (1 << h_sh) >> 1, h_sh, -1);
                 }
-                let vclamp = if prep { -1 } else { bdmax };
-                for yy in 0..h {
-                    if !crate::av2_recon::work_tick("av2_inter:mc2d_v") { break; }
-                    crate::simd::fir8_col(
-                        &mid[yy * w..(yy + 7) * w + w],
-                        w,
-                        fv,
-                        &mut dst[yy * dst_w..yy * dst_w + w],
-                        (1 << v_sh) >> 1,
-                        v_sh,
-                        vclamp,
-                    );
-                }
+                crate::simd::fir8_v(mid, w, fv, dst, dst_w, w, h, (1 << v_sh) >> 1, v_sh, if prep { -1 } else { bdmax });
             });
         }
         (Some(fh), None) => {
             // put: (s + 34) >> 6 clamped; prep: (s + 2) >> 2 unclamped.
             let (sh, rnd) = if prep { (BITS - IB, (1 << (BITS - IB)) >> 1) } else { (BITS, ((1 << BITS) >> 1) + ((1 << (BITS - IB)) >> 1)) };
+            let clamp = if prep { -1 } else { bdmax };
             if interior {
-                let clamp = if prep { -1 } else { bdmax };
-                for yy in 0..h {
-                    let base = ((dy + yy as i32) as usize) * stride + (dx - 3) as usize;
-                    crate::simd::fir8_row_u16(
-                        &px[base..base + w + 7],
-                        fh,
-                        &mut dst[yy * dst_w..yy * dst_w + w],
-                        rnd,
-                        sh,
-                        clamp,
-                    );
-                }
+                let base = (dy as usize) * stride + (dx - 3) as usize;
+                crate::simd::fir8_h_u16(&px[base..], stride, fh, dst, dst_w, w, h, rnd, sh, clamp);
             } else {
-                for yy in 0..h {
-                    if !crate::av2_recon::work_tick("av2_inter:mc_h") { break; }
-                    let sy = dy + yy as i32;
-                    for xx in 0..w {
-                        let sx = dx + xx as i32;
-                        let s: i32 = (0..8).map(|k| fh[k] as i32 * get(sx + k as i32 - 3, sy)).sum();
-                        let v = (s + rnd) >> sh;
-                        dst[yy * dst_w + xx] = if prep { v } else { v.clamp(0, bdmax) };
-                    }
-                }
+                fir_h_block(rf, win, dx, dy, fh, dst, dst_w, w, h, rnd, sh, clamp);
             }
         }
         (None, Some(fv)) => {
             // put: (s + 32) >> 6 clamped; prep: (s + 2) >> 2 unclamped.
             let (sh, rnd) = if prep { (BITS - IB, (1 << (BITS - IB)) >> 1) } else { (BITS, (1 << BITS) >> 1) };
+            let clamp = if prep { -1 } else { bdmax };
             if interior {
-                let clamp = if prep { -1 } else { bdmax };
-                for yy in 0..h {
-                    let base = ((dy - 3 + yy as i32) as usize) * stride + dx as usize;
-                    crate::simd::fir8_col_u16(
-                        &px[base..base + 7 * stride + w],
-                        stride,
-                        fv,
-                        &mut dst[yy * dst_w..yy * dst_w + w],
-                        rnd,
-                        sh,
-                        clamp,
-                    );
-                }
+                let base = ((dy - 3) as usize) * stride + dx as usize;
+                crate::simd::fir8_v_u16(&px[base..], stride, fv, dst, dst_w, w, h, rnd, sh, clamp);
             } else {
-                for yy in 0..h {
-                    if !crate::av2_recon::work_tick("av2_inter:mc_v") { break; }
-                    let sy = dy + yy as i32;
-                    for xx in 0..w {
-                        let sx = dx + xx as i32;
-                        let s: i32 = (0..8).map(|k| fv[k] as i32 * get(sx, sy + k as i32 - 3)).sum();
-                        let v = (s + rnd) >> sh;
-                        dst[yy * dst_w + xx] = if prep { v } else { v.clamp(0, bdmax) };
-                    }
-                }
+                fir_v_extended(rf, win, dx, dy, w, h, fv, dst, dst_w, rnd, sh, clamp);
             }
         }
         (None, None) => {
@@ -281,26 +308,26 @@ fn mc_core(
 
 /// dav2d `avg_c` (mc_tmpl.c:673): (t1 + t2 + 16) >> 5, clamped.
 pub fn comp_avg(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize, h: usize, bdmax: i32) {
-    for y in 0..h {
-        if !crate::av2_recon::work_tick("av2_inter:223") { break; }
-        crate::simd::avg_row(&t1[y * w..y * w + w], &t2[y * w..y * w + w], &mut dst[y * dst_w..y * dst_w + w], bdmax);
+    if !crate::av2_recon::work_tick("av2_inter:223") {
+        return;
     }
+    crate::simd::avg(t1, t2, w, dst, dst_w, w, h, bdmax);
 }
 
 /// dav2d `w_avg_c` (mc_tmpl.c:694): (t1*wt + t2*(16-wt) + 128) >> 8, clamped.
 pub fn comp_w_avg(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize, h: usize, wt: i32, bdmax: i32) {
-    for y in 0..h {
-        if !crate::av2_recon::work_tick("av2_inter:232") { break; }
-        crate::simd::w_avg_row(&t1[y * w..y * w + w], &t2[y * w..y * w + w], &mut dst[y * dst_w..y * dst_w + w], wt, bdmax);
+    if !crate::av2_recon::work_tick("av2_inter:232") {
+        return;
     }
+    crate::simd::w_avg(t1, t2, w, dst, dst_w, w, h, wt, bdmax);
 }
 
 /// dav2d `mask_c` (mc_tmpl.c:716): (t1*m + t2*(64-m) + 512) >> 10, clamped. `mask` stride = w.
 pub fn comp_mask(dst: &mut [i32], dst_w: usize, t1: &[i32], t2: &[i32], w: usize, h: usize, mask: &[u8], bdmax: i32) {
-    for y in 0..h {
-        if !crate::av2_recon::work_tick("av2_inter:241") { break; }
-        crate::simd::mask_row(&t1[y * w..y * w + w], &t2[y * w..y * w + w], &mask[y * w..y * w + w], &mut dst[y * dst_w..y * dst_w + w], bdmax);
+    if !crate::av2_recon::work_tick("av2_inter:241") {
+        return;
     }
+    crate::simd::mask(t1, t2, mask, w, dst, dst_w, w, h, bdmax);
 }
 
 /// dav2d `w_mask_c` 420 variant (mc_tmpl.c:754): SEG difference-mask blend. Computes the per-pixel
@@ -314,20 +341,23 @@ pub fn comp_w_mask_ss(
     // dav w_mask (mc_tmpl.c, dav1d heritage): blend by the derived 6-bit mask and store the
     // CHROMA-resolution mask: 444 = m; 422 = (m+n+1-sign)>>1; 420 = two-row fold
     // (m+n [+row0] + 2 - sign) >> 2.
-    const MASK_SH: i32 = 8; // bitdepth(8) + intermediate_bits(4) - 4
-    const MASK_RND: i32 = 1 << (MASK_SH - 5);
+    // dav2d w_mask: mask_sh = bitdepth + intermediate_bits - 4 (intermediate_bits is 4 at 8 and
+    // 10 bits here), so 8 at 8-bit and 10 at 10-bit.
+    let bitdepth = 32 - (bdmax as u32).leading_zeros() as i32;
+    let mask_sh = bitdepth + 4 - 4;
+    let mask_rnd = 1 << (mask_sh - 5);
     let mut mrow = 0usize;
     for y in 0..h {
         if !crate::av2_recon::work_tick("av2_inter:263") { break; }
         let mut x = 0usize;
         while x < w {
             let d = t1[y * w + x] - t2[y * w + x];
-            let m = (38 + ((d.abs() + MASK_RND) >> MASK_SH)).min(64);
+            let m = (38 + ((d.abs() + mask_rnd) >> mask_sh)).min(64);
             dst[y * dst_w + x] = ((d * m + t2[y * w + x] * 64 + 512) >> 10).clamp(0, bdmax);
             if ss_hor == 1 {
                 x += 1;
                 let d2 = t1[y * w + x] - t2[y * w + x];
-                let n = (38 + ((d2.abs() + MASK_RND) >> MASK_SH)).min(64);
+                let n = (38 + ((d2.abs() + mask_rnd) >> mask_sh)).min(64);
                 dst[y * dst_w + x] = ((d2 * n + t2[y * w + x] * 64 + 512) >> 10).clamp(0, bdmax);
                 let cell = &mut mask_out[mrow * mask_stride + (x >> 1)];
                 if ss_ver == 1 {
@@ -367,14 +397,51 @@ pub fn bacp_mask(
 
 // ===================== TIP / OPFL prediction kernels (dav2d mc_tmpl.c + recon_tmpl.c) =====================
 
-/// Windowed sample fetch (dav `mc`/`mc_opfl` emu_edge semantics): replicate-pad from the
-/// rectangle [l..r) x [t..b) of the plane.
-#[inline]
-fn wget(rf: &Plane, x: i32, y: i32, l: i32, r: i32, t: i32, b: i32) -> i32 {
-    // HARDENING: a corrupt warp/ref rectangle can invert or exceed the plane — clamp into it.
-    let (rx, by) = (r.max(l + 1).min(rf.w as i32), b.max(t + 1).min(rf.h as i32));
-    let (lx, ty) = (l.max(0).min(rx - 1), t.max(0).min(by - 1));
-    rf.at(x.clamp(lx, rx - 1) as usize, y.clamp(ty, by - 1) as usize)
+/// A clamped fetch window over a reference plane: `wget(x, y)` reads the sample at (x, y) clamped
+/// into the window, itself clamped into the plane, and 0 outside the plane's storage (the
+/// `Plane::at` discipline). The window bounds are resolved once, not per sample.
+struct BilinWin<'a> {
+    px: &'a [u16],
+    stride: usize,
+    lx: i32,
+    rx1: i32,
+    ty: i32,
+    by1: i32,
+}
+
+impl<'a> BilinWin<'a> {
+    fn new(rf: &'a Plane, (l, r, t, b): (i32, i32, i32, i32)) -> Self {
+        // HARDENING: a corrupt warp/ref rectangle can invert or exceed the plane — clamp into it.
+        let (rx, by) = (r.max(l + 1).min(rf.w as i32), b.max(t + 1).min(rf.h as i32));
+        let (lx, ty) = (l.max(0).min(rx - 1), t.max(0).min(by - 1));
+        BilinWin { px: &rf.px, stride: rf.stride, lx, rx1: rx - 1, ty, by1: by - 1 }
+    }
+
+    /// The storage offset of row `y`'s clamped start.
+    #[inline(always)]
+    fn row(&self, y: i32) -> usize {
+        (y.clamp(self.ty, self.by1) as usize).wrapping_mul(self.stride)
+    }
+
+    #[inline(always)]
+    fn get(&self, row: usize, x: i32) -> i32 {
+        self.px.get(row.wrapping_add(x.clamp(self.lx, self.rx1) as usize)).map_or(0, |&v| v as i32)
+    }
+
+    /// Rows `y0..y0 + rows` x columns `x0..x0 + cols` as plain slices, when that rectangle lies
+    /// inside the window (so no clamp would move any read) and inside the storage.
+    fn interior(&self, x0: i32, y0: i32, cols: usize, rows: usize) -> Option<impl Fn(usize) -> &'a [u16] + '_> {
+        let inside = x0 >= self.lx
+            && x0 + cols as i32 - 1 <= self.rx1
+            && y0 >= self.ty
+            && y0 + rows as i32 - 1 <= self.by1
+            && (y0 as usize + rows - 1) * self.stride + x0 as usize + cols <= self.px.len();
+        let (px, stride) = (self.px, self.stride);
+        inside.then(move || move |r: usize| {
+            let o = (y0 as usize + r) * stride + x0 as usize;
+            &px[o..o + cols]
+        })
+    }
 }
 
 /// dav2d `put_bilin_c` via the windowed `mc()` (8-bit PUT, mv at 1/8-pel, bilinear 2-tap).
@@ -383,20 +450,63 @@ pub fn put_bilin_win(
     rf: &Plane, dst: &mut [i32], dstride: usize, bx_px: i32, by_px: i32, w: usize, h: usize,
     mvy: i32, mvx: i32, win: (i32, i32, i32, i32),
 ) {
-    let (l, r, t, b) = win;
+    let wn = BilinWin::new(rf, win);
     let bdmax = crate::av2_frame::BDMAX.with(|c| c.get());
     let mx = (mvx & 7) << 1;
     let my = (mvy & 7) << 1;
     let dx = bx_px + (mvx >> 3);
     let dy = by_px + (mvy >> 3);
     let bil = |v0: i32, v1: i32, m: i32| 16 * v0 + m * (v1 - v0);
+    // Interior fast path: the whole (w+1) x (h+1) fetch lies inside the window, so every read is
+    // a plain slice element, the same value the clamped fetch returns. Most TIP cells qualify.
+    if w > 0 && h > 0 {
+        if let Some(src) = wn.interior(dx, dy, w + 1, h + 1) {
+            if mx != 0 && my != 0 {
+                let mut mid = vec![0i32; (h + 1) * w];
+                for yy in 0..h + 1 {
+                    let r = src(yy);
+                    for (m, (a, b)) in mid[yy * w..(yy + 1) * w].iter_mut().zip(r.iter().zip(&r[1..])) {
+                        *m = bil(*a as i32, *b as i32, mx);
+                    }
+                }
+                for yy in 0..h {
+                    let (m0, m1) = (&mid[yy * w..(yy + 1) * w], &mid[(yy + 1) * w..(yy + 2) * w]);
+                    for (d, (a, b)) in dst[yy * dstride..yy * dstride + w].iter_mut().zip(m0.iter().zip(m1)) {
+                        *d = ((bil(*a, *b, my) + 128) >> 8).clamp(0, bdmax);
+                    }
+                }
+            } else if mx != 0 {
+                for yy in 0..h {
+                    let r = src(yy);
+                    for (d, (a, b)) in dst[yy * dstride..yy * dstride + w].iter_mut().zip(r.iter().zip(&r[1..])) {
+                        *d = ((bil(*a as i32, *b as i32, mx) + 8) >> 4).clamp(0, bdmax);
+                    }
+                }
+            } else if my != 0 {
+                for yy in 0..h {
+                    let (r0, r1) = (src(yy), src(yy + 1));
+                    for (d, (a, b)) in dst[yy * dstride..yy * dstride + w].iter_mut().zip(r0.iter().zip(r1)) {
+                        *d = ((bil(*a as i32, *b as i32, my) + 8) >> 4).clamp(0, bdmax);
+                    }
+                }
+            } else {
+                for yy in 0..h {
+                    for (d, a) in dst[yy * dstride..yy * dstride + w].iter_mut().zip(src(yy)) {
+                        *d = *a as i32;
+                    }
+                }
+            }
+            return;
+        }
+    }
     if mx != 0 && my != 0 {
         let mut mid = vec![0i32; (h + 1) * w];
         for yy in 0..h + 1 {
             if !crate::av2_recon::work_tick("av2_inter:337") { break; }
+            let row = wn.row(dy + yy as i32);
             for xx in 0..w {
-                let (sx, sy) = (dx + xx as i32, dy + yy as i32);
-                mid[yy * w + xx] = bil(wget(rf, sx, sy, l, r, t, b), wget(rf, sx + 1, sy, l, r, t, b), mx);
+                let sx = dx + xx as i32;
+                mid[yy * w + xx] = bil(wn.get(row, sx), wn.get(row, sx + 1), mx);
             }
         }
         for yy in 0..h {
@@ -409,26 +519,29 @@ pub fn put_bilin_win(
     } else if mx != 0 {
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:350") { break; }
+            let row = wn.row(dy + yy as i32);
             for xx in 0..w {
-                let (sx, sy) = (dx + xx as i32, dy + yy as i32);
-                let px = bil(wget(rf, sx, sy, l, r, t, b), wget(rf, sx + 1, sy, l, r, t, b), mx);
+                let sx = dx + xx as i32;
+                let px = bil(wn.get(row, sx), wn.get(row, sx + 1), mx);
                 dst[yy * dstride + xx] = ((px + 8) >> 4).clamp(0, bdmax);
             }
         }
     } else if my != 0 {
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:358") { break; }
+            let (r0, r1) = (wn.row(dy + yy as i32), wn.row(dy + yy as i32 + 1));
             for xx in 0..w {
-                let (sx, sy) = (dx + xx as i32, dy + yy as i32);
-                let v = bil(wget(rf, sx, sy, l, r, t, b), wget(rf, sx, sy + 1, l, r, t, b), my);
+                let sx = dx + xx as i32;
+                let v = bil(wn.get(r0, sx), wn.get(r1, sx), my);
                 dst[yy * dstride + xx] = ((v + 8) >> 4).clamp(0, bdmax);
             }
         }
     } else {
         for yy in 0..h {
             if !crate::av2_recon::work_tick("av2_inter:366") { break; }
+            let row = wn.row(dy + yy as i32);
             for xx in 0..w {
-                dst[yy * dstride + xx] = wget(rf, dx + xx as i32, dy + yy as i32, l, r, t, b);
+                dst[yy * dstride + xx] = wn.get(row, dx + xx as i32);
             }
         }
     }
@@ -444,6 +557,9 @@ pub fn prep_opfl(
         crate::dlog!("[PREP-BAD] dst.len={} dstride={dstride} w={w} h={h} px={px_base} py={py_base}", dst.len());
     }
     let (l, r, t, b) = win;
+    // HARDENING: a corrupt warp/ref rectangle can invert or exceed the plane -- clamp into it.
+    let (rx, by) = (r.max(l + 1).min(rf.w as i32), b.max(t + 1).min(rf.h as i32));
+    let win = ReadWin { x0: l.max(0).min(rx - 1), x1: rx - 1, y0: t.max(0).min(by - 1), y1: by - 1 };
     let mx = mvx16 & 15;
     let my = mvy16 & 15;
     let dx = px_base + (mvx16 >> 4);
@@ -456,52 +572,40 @@ pub fn prep_opfl(
         (Some(fh), Some(fv)) => {
             let h_sh = BITS - IB; // 2
             let midh = h + 7;
-            let mut mid = vec![0i32; midh * w];
-            for yy in 0..midh {
-                if !crate::av2_recon::work_tick("av2_inter:397") { break; }
-                let sy = dy - 3 + yy as i32;
-                for xx in 0..w {
-                    let sx = dx + xx as i32;
-                    let s: i32 = (0..8).map(|k| fh[k] as i32 * wget(rf, sx + k as i32 - 3, sy, l, r, t, b)).sum();
-                    mid[yy * w + xx] = (s + ((1 << h_sh) >> 1)) >> h_sh;
+            MC_MID.with(|c| {
+                let mut mid_b = c.borrow_mut();
+                if mid_b.len() < midh * w {
+                    mid_b.resize(midh * w, 0);
                 }
-            }
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:405") { break; }
-                for xx in 0..w {
-                    let s: i32 = (0..8).map(|k| fv[k] as i32 * mid[(yy + k) * w + xx]).sum();
-                    dst[yy * dstride + xx] = (s + ((1 << BITS) >> 1)) >> BITS;
-                }
-            }
+                let mid = &mut mid_b[..midh * w];
+                fir_h_block(rf, win, dx, dy - 3, fh, mid, w, w, midh, (1 << h_sh) >> 1, h_sh, -1);
+                crate::simd::fir8_v(mid, w, fv, dst, dstride, w, h, (1 << BITS) >> 1, BITS, -1);
+            });
         }
         (Some(fh), None) => {
             let sh = BITS - IB;
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:414") { break; }
-                let sy = dy + yy as i32;
-                for xx in 0..w {
-                    let sx = dx + xx as i32;
-                    let s: i32 = (0..8).map(|k| fh[k] as i32 * wget(rf, sx + k as i32 - 3, sy, l, r, t, b)).sum();
-                    dst[yy * dstride + xx] = (s + ((1 << sh) >> 1)) >> sh;
-                }
-            }
+            fir_h_block(rf, win, dx, dy, fh, dst, dstride, w, h, (1 << sh) >> 1, sh, -1);
         }
         (None, Some(fv)) => {
             let sh = BITS - IB;
-            for yy in 0..h {
-                if !crate::av2_recon::work_tick("av2_inter:425") { break; }
-                for xx in 0..w {
-                    let sx = dx + xx as i32;
-                    let s: i32 = (0..8).map(|k| fv[k] as i32 * wget(rf, sx, dy + yy as i32 + k as i32 - 3, l, r, t, b)).sum();
-                    dst[yy * dstride + xx] = (s + ((1 << sh) >> 1)) >> sh;
-                }
+            let rnd = (1 << sh) >> 1;
+            let interior = dx >= win.x0
+                && dx + w as i32 - 1 <= win.x1
+                && dy - 3 >= win.y0
+                && dy + h as i32 + 3 <= win.y1
+                && rf.px.len() >= (dy + h as i32 + 3) as usize * rf.stride + dx as usize + w;
+            if interior {
+                let base = (dy - 3) as usize * rf.stride + dx as usize;
+                crate::simd::fir8_v_u16(&rf.px[base..], rf.stride, fv, dst, dstride, w, h, rnd, sh, -1);
+            } else {
+                fir_v_extended(rf, win, dx, dy, w, h, fv, dst, dstride, rnd, sh, -1);
             }
         }
         (None, None) => {
             for yy in 0..h {
                 if !crate::av2_recon::work_tick("av2_inter:434") { break; }
                 for xx in 0..w {
-                    dst[yy * dstride + xx] = wget(rf, dx + xx as i32, dy + yy as i32, l, r, t, b) << IB;
+                    dst[yy * dstride + xx] = win.sample(rf, dx + xx as i32, dy + yy as i32) << IB;
                 }
             }
         }
@@ -589,8 +693,32 @@ pub struct OpflReg {
 pub fn opfl_derive_mv(
     p0: &[i32], s0: usize, p1: &[i32], s1: usize, w: usize, h: usize, bs: usize, d: (i32, i32),
 ) -> Vec<OpflReg> {
-    let mut tmp0 = [0i32; 64 * 16];
-    let mut tmp1 = [0i32; 64 * 16];
+    OPFL_SCRATCH.with_borrow_mut(|sc| opfl_derive_mv_in(p0, s0, p1, s1, w, h, bs, d, sc))
+}
+
+/// `opfl_derive_mv`'s four 64x16 intermediates.
+struct OpflScratch {
+    tmp0: [i32; 64 * 16],
+    tmp1: [i32; 64 * 16],
+    gx0: [i32; 64 * 16],
+    gy0: [i32; 64 * 16],
+}
+
+thread_local! {
+    /// Reused across calls: every sample read is written first in the same call (the tail past
+    /// an off-grid `w`/`h` is zeroed explicitly). Fresh zeroed arrays cost four 4 KB memsets
+    /// per call.
+    static OPFL_SCRATCH: std::cell::RefCell<OpflScratch> = const {
+        std::cell::RefCell::new(OpflScratch { tmp0: [0; 64 * 16], tmp1: [0; 64 * 16], gx0: [0; 64 * 16], gy0: [0; 64 * 16] })
+    };
+}
+
+#[allow(clippy::too_many_arguments)]
+fn opfl_derive_mv_in(
+    p0: &[i32], s0: usize, p1: &[i32], s1: usize, w: usize, h: usize, bs: usize, d: (i32, i32),
+    sc: &mut OpflScratch,
+) -> Vec<OpflReg> {
+    let OpflScratch { tmp0, tmp1, gx0, gy0 } = sc;
     // HARDENING: the fixed 64x16 scratch bounds the OPFL unit; a desynced stream can present a
     // larger nominal block — clamp instead of overrunning (valid units are <= 64x16).
     let (w, h) = (w.min(64), h.min(16));
@@ -614,8 +742,6 @@ pub fn opfl_derive_mv(
             }
         }
     }
-    let mut gx0 = [0i32; 64 * 16];
-    let mut gy0 = [0i32; 64 * 16];
     let mut bx = 0usize;
     while bx < w {
         if !crate::av2_recon::work_tick("av2_inter:548") { break; }
@@ -642,6 +768,17 @@ pub fn opfl_derive_mv(
             }
         }
         bx += 16;
+    }
+    if bs != 0 && (w % bs != 0 || h % bs != 0) {
+        // The regression below reads whole bs x bs cells, past an off-grid w x h: keep those
+        // reads at zero, as fresh buffers gave.
+        for buf in [&mut *gx0, &mut *gy0, &mut *tmp1] {
+            for (i, v) in buf.iter_mut().enumerate() {
+                if i / 64 >= h || i % 64 >= w {
+                    *v = 0;
+                }
+            }
+        }
     }
     let mut out = Vec::with_capacity(16);
     let mut y = 0usize;

@@ -275,7 +275,7 @@ pub fn read_tx_part(
     let f = fsc as usize;
     let i = inter as usize;
     let is_split = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.tx_split[f][i][szctx]);
-    if std::env::var("MTXP").is_ok() {
+    if crate::env_is_set!("MTXP") {
         crate::dlog!("[MTXP] split={} szctx={szctx} fsc={f} inter={i} rng={}", is_split as u8, msac.rng);
     }
     if !is_split {
@@ -301,7 +301,7 @@ pub fn read_tx_part(
             _ => 0,
         };
         let part = 1 + rav1d_msac_decode_symbol_adapt8(msac, &mut cdf.tx2d.tx_part_2d[f][i][vhctx], 6);
-        if std::env::var("MTXP").is_ok() { crate::dlog!("[MTXP] part2d={part} vhctx={vhctx} rng={}", msac.rng); }
+        if crate::env_is_set!("MTXP") { crate::dlog!("[MTXP] part2d={part} vhctx={vhctx} rng={}", msac.rng); }
         part
     } else if bw4.max(bh4) >= 4 {
         // 1D arm (thin 1:4+ blocks): ctx = bw4 >= 4 cells (16px wide).
@@ -457,7 +457,7 @@ pub fn read_delta_q(
             crate::av2_dequant::dq_lookup(clipq(d[3] + base_uvac)),
             crate::av2_dequant::dq_lookup(clipq(d[4] + base_uvac)),
         ]));
-        if std::env::var("MDQ").is_ok() {
+        if crate::env_is_set!("MDQ") {
             crate::dlog!("[MDQ] mi=({bx4},{by4}) dq={delta_q} qidx={new_qidx} rng={}", msac.rng);
         }
     }
@@ -589,7 +589,8 @@ thread_local! {
     /// A corrupt stream can otherwise spin a step-loop forever (fuzz HANG class). The budget is
     /// generous vs. real work (a 512x512 frame is ~16k 4px blocks; each does bounded per-block
     /// work), so no valid stream can reach it — it is a safety net, not a policy.
-    pub static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Ticks LEFT in this frame's budget: `work_reset` sets it to the cap, each tick takes one.
+    pub static WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(WORK_CAP_DEFAULT) };
     pub static WORK_TRIPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
     /// The current frame is an S_FRAME (frame_type==3). Consumed by update_ref_slots so the
@@ -895,7 +896,7 @@ pub fn get_ref_frames(n_bits: u32, poc: u32) -> (u32, [u8; 7]) {
     for n in 0..7 {
         refidx[n] = sort_idx[if n < n_refs { n } else { 0 }];
     }
-    if std::env::var("PREFDBG").is_ok() {
+    if crate::env_is_set!("PREFDBG") {
         let mut line = format!("[MREFL] poc={poc} n={} list:", n_refs.min(7));
         for n in 0..n_refs.min(7) {
             let sl = sort_idx[n] as usize;
@@ -943,7 +944,7 @@ pub fn cap_path(name: &str) -> String {
 pub fn dbg_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        std::env::var("RUSTY_AV2D_DEBUG").is_ok() || std::env::var("RAV2D_DEBUG").is_ok()
+        crate::env_is_set!("RUSTY_AV2D_DEBUG") || crate::env_is_set!("RAV2D_DEBUG")
     })
 }
 
@@ -953,29 +954,43 @@ macro_rules! dlog {
     ($($arg:tt)*) => { if $crate::av2_recon::dbg_on() { eprintln!($($arg)*); } };
 }
 
+/// The default per-frame work budget: ~64M ticks, orders of magnitude above any legal frame's
+/// walker iterations.
+const WORK_CAP_DEFAULT: u64 = 64_000_000;
+
+/// The per-frame work budget. WORKBUDGET=<n> overrides it (diagnostics: set it low to prove the
+/// budget is live and to name whichever walker a corrupt stream is spinning in).
+fn work_cap() -> u64 {
+    static CAP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("WORKBUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(WORK_CAP_DEFAULT)
+    })
+}
+
 /// Per-frame work budget: reset at frame start.
 pub fn work_reset() {
-    WORK.with(|c| c.set(0));
+    WORK.with(|c| c.set(work_cap()));
     WORK_TRIPPED.with(|c| c.set(false));
 }
 
 /// Tick the work budget. Returns false once the frame's budget is exhausted — callers must
 /// then stop iterating (a corrupt stream is spinning). Logs once, on the site that tripped it.
+///
+/// The tick sits on the hottest inner loops, so it is a thread-local decrement and a test: the
+/// cap is read once per frame by `work_reset`, not once per tick.
 #[inline]
 pub fn work_tick(site: &str) -> bool {
-    let n = WORK.with(|c| { let v = c.get() + 1; c.set(v); v });
-    // ~64M ticks: orders of magnitude above any legal frame's walker iterations.
-    // WORKBUDGET=<n> overrides it (diagnostics: set it low to prove the budget is live and
-    // to name whichever walker a corrupt stream is spinning in).
-    // The cap is read ONCE (an env lookup per tick was a severe slowdown — the tick is on
-    // the hottest inner loops).
-    static CAP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    let cap = *CAP.get_or_init(|| {
-        std::env::var("WORKBUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(64_000_000)
-    });
-    if n <= cap {
+    let left = WORK.with(|c| c.get());
+    if left != 0 {
+        WORK.with(|c| c.set(left - 1));
         return true;
     }
+    work_exhausted(site)
+}
+
+#[cold]
+#[inline(never)]
+fn work_exhausted(site: &str) -> bool {
     if !WORK_TRIPPED.with(|c| c.replace(true)) {
         crate::dlog!("[rav2d AV2] work budget exhausted at `{site}` — corrupt stream, aborting frame");
     }
@@ -1076,7 +1091,7 @@ pub fn update_ref_slots(is_key_or_intra: bool) {
 /// tip.subpel_filter, skip_txfm=1) through the normal TIP recon path. No symbols, no residual;
 /// per-cell temporal writes happen inside tip_pred_luma.
 pub fn tip_recon_sb(bx4: usize, by4: usize, iw4: usize, ih4: usize) {
-    if std::env::var("TIPDBG").is_ok() {
+    if crate::env_is_set!("TIPDBG") {
         crate::dlog!("[MTIPSB] bx4={bx4} by4={by4}");
     }
     let cfg = HDR_TOOL_CFG.with(|c| c.get());
@@ -1903,7 +1918,7 @@ pub fn decode_sb_luma(s: &mut SbState, bs: usize, bx4: usize, by4: usize) -> u32
     // Key-frame twin of the inter path's [SBI] probe, aligned with avm's PARTPROBE `[PARTIN]`
     // (decodeframe.c:1843) so the two traces diff node-for-node. `rng` is printed at partition-node
     // ENTRY, as avm's is; `dif` comes too, because rng alone hides bypass-only divergences.
-    if std::env::var("PARTIN").is_ok() {
+    if crate::env_is_set!("PARTIN") {
         crate::dlog!("[PARTIN] mi=({bx4},{by4}) bs={bs} rng={} dif={:x}", s.msac.rng, s.msac.dif);
     }
     let (bp, _half) = decode_partition(
@@ -1923,7 +1938,7 @@ pub fn decode_sb_luma(s: &mut SbState, bs: usize, bx4: usize, by4: usize) -> u32
             let have_top = by4 > tb.2;
             // Generic symbol-level oracle: entry rng at each luma leaf, aligned to dav2d's
             // `decode_b[y=,x=,plane=y]: r=` (y/x in 4px units). Diff to find the first divergence.
-            if std::env::var("MTRACE").is_ok() {
+            if crate::env_is_set!("MTRACE") {
                 crate::dlog!("[ML] y={by4} x={bx4} r={} d={:x}", s.msac.rng, s.msac.dif);
             }
             // cdef top-neighbour: for 64px SBs each SB is a single cdef unit, so the top
@@ -1937,16 +1952,16 @@ pub fn decode_sb_luma(s: &mut SbState, bs: usize, bx4: usize, by4: usize) -> u32
                 s.force_integer_mv, s.max_bvp_drl_bits, &mut s.left_cdef, &mut s.left_ccso, top_cdef,
                 true, false, false, 3,
             );
-            if std::env::var("SBTRACE").is_ok() {
+            if crate::env_is_set!("SBTRACE") {
                 crate::dlog!(
                     "[rav2d SB] leaf bs={bs} ({bx4},{by4}) fsc={} intrabc={} eob={} rng={}",
                     info.fsc as u8, info.intrabc as u8, info.eob, s.msac.rng
                 );
             }
-            if std::env::var("F1BLK").is_ok() && info.intrabc {
+            if crate::env_is_set!("F1BLK") && info.intrabc {
                 crate::dlog!("F1BLK bx={bx4} by={by4} bv=({},{})", info.ibc_bv.0, info.ibc_bv.1);
             }
-            if std::env::var("AIDBG").map_or(false, |v| v == "all" || v == format!("{bx4},{by4}")) {
+            if crate::env_get!("AIDBG").map_or(false, |v| v == "all" || v == format!("{bx4},{by4}")) {
                 crate::dlog!("AIDBG ({bx4},{by4}) bs={bs} y_mode_idx={} midx={} mrl={} fsc={} eob={} rng={}",
                     info.y_mode_idx, info.midx, info.mrl_index, info.fsc as u8, info.eob, s.msac.rng);
             }
@@ -2159,7 +2174,7 @@ pub fn decode_sb_key(
         s.msac, &mut s.cdf.m, bs, &s.a_part, &s.l_part, bx4, by4, have_h_split, have_v_split, 3,
         true, 0, jssh, jssv, iw4, ih4, false,
     );
-    if std::env::var("MPARTK").is_ok() { crate::dlog!("[MPARTK] mi=({bx4},{by4}) bs={bs} bp={bp:?} rng={}", s.msac.rng); }
+    if crate::env_is_set!("MPARTK") { crate::dlog!("[MPARTK] mi=({bx4},{by4}) bs={bs} bp={bp:?} rng={}", s.msac.rng); }
     match bp {
         BlockPartition::None => {
             // Joint >=64px yuv leaf (dav decode_b with both planes valid).
@@ -2263,7 +2278,7 @@ fn decode_b_key_yuv(
         } else {
             crate::av2_coef::skip_ctx_luma(&a_nb.lcoef[ubx4..], &l_nb.lcoef[uby4..], uslw, uslh, &bd) as usize
         };
-        if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({ubx4},{uby4}) pl=0k txs={u_tdc} skipctx={sctx} rng={}", msac.rng); }
+        if crate::env_is_set!("MTXB") { crate::dlog!("[MTXB] mi=({ubx4},{uby4}) pl=0k txs={u_tdc} skipctx={sctx} rng={}", msac.rng); }
         let az = rav1d_msac_decode_bool_adapt(msac, &mut cdf.coef.skip[skip_set][u_tdc][sctx]);
         let mut cf = vec![0i32; 1usize << (uslw + uslh + 4)];
         let (cf_ctx, u_txtp, u_stxt, u_stxs) = if az {
@@ -2342,7 +2357,7 @@ pub fn decode_b_chroma(
     };
     // --- intra_uv_mode --- CfL flag, context = (#neighbours that are CFL_PRED), then UV mode.
     const CFL_PRED: u8 = 13;
-    if std::env::var("MTRACE").is_ok() {
+    if crate::env_is_set!("MTRACE") {
         crate::dlog!("[CML] y={by4} x={bx4} r={} d={:x}", msac.rng, msac.dif);
     }
     let bdc0 = BLOCK_DIMENSIONS[bs];
@@ -2357,7 +2372,7 @@ pub fn decode_b_chroma(
         && cbw4c.max(cbh4c) <= 16;
     let cfl_ctx = (nb.a_uvmode[cbx4] == CFL_PRED) as usize + (nb.l_uvmode[cby4] == CFL_PRED) as usize;
     let is_cfl = cfl_allowed && rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.cfl[cfl_ctx]);
-    if std::env::var("MUVCK").is_ok() {
+    if crate::env_is_set!("MUVCK") {
         crate::dlog!("[MUVCK] mi=({bx4},{by4}) allowed={} dis={} ctx={cfl_ctx} cfl={} r={}", cfl_allowed as u8, nb.sdp_cfl_disallowed as u8, is_cfl as u8, msac.rng);
     }
     // C-chroma recon: capture the CfL sub-mode (1=explicit, 2=derived, 3=mhccp) + explicit alphas.
@@ -2375,7 +2390,7 @@ pub fn decode_b_chroma(
         let (cbw4, cbh4) = ((bdc[0] as usize >> ssh).max(1), (bdc[1] as usize >> ssv).max(1));
         let mhccp_allowed = cbw4.max(cbh4) <= 8 && cbw4 * cbh4 >= 2;
         let seq_cfl = true; // plumb from the seq header
-        if std::env::var("MCFL").is_ok() { crate::dlog!("[MCFLSW] mi=({bx4},{by4}) allowed={} cell={:?} rng={}", mhccp_allowed as u8, cdf.m.mhccp, msac.rng); }
+        if crate::env_is_set!("MCFL") { crate::dlog!("[MCFLSW] mi=({bx4},{by4}) allowed={} cell={:?} rng={}", mhccp_allowed as u8, cdf.m.mhccp, msac.rng); }
         if mhccp_allowed && (!seq_cfl || rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.mhccp)) {
             let sz_ctx = SIZE_GROUP[bs] as usize;
             mh_dir = rav1d_msac_decode_symbol_adapt4(msac, &mut cdf.m.mhccp_filter_dir[sz_ctx], 2) as u8;
@@ -2401,7 +2416,7 @@ pub fn decode_b_chroma(
         } else {
             cfl_mode = 2; // CFL_DERIVED (implicit alpha)
         }
-        if std::env::var("MUVCK").is_ok() {
+        if crate::env_is_set!("MUVCK") {
             crate::dlog!("[MUVCK2] mi=({bx4},{by4}) cfl_mode={cfl_mode} mh_dir={mh_dir} r={}", msac.rng);
         }
         (CFL_PRED, 0)
@@ -2427,7 +2442,7 @@ pub fn decode_b_chroma(
             (DEFAULT_MODE_LIST_UV[idx.min(7)], 0)
         }
     };
-    if std::env::var("MUVCK").is_ok() {
+    if crate::env_is_set!("MUVCK") {
         crate::dlog!("[MUVCK3] mi=({bx4},{by4}) uv_mode={uv_mode} angle={uv_angle} r={}", msac.rng);
     }
     // Splat this block's uvmode for the next block's CfL context (dav2d uvmode set_ctx).
@@ -2452,26 +2467,26 @@ pub fn decode_b_chroma(
         crate::av2_frame::FRAME.with(|f| f.borrow_mut().mark_db_chroma(cbx4, cby4, cbw4, cbh4));
     }
     // U plane.
-    let ct48 = std::env::var("CT48").is_ok() && bx4 == 16 && by4 == 48;
+    let ct48 = crate::env_is_set!("CT48") && bx4 == 16 && by4 == 48;
     if ct48 { crate::dlog!("[CT48] post-uvmode uv_mode={uv_mode} cfl={is_cfl} cfl_ctx={cfl_ctx} cfl_allowed={cfl_allowed} a_uv[{cbx4}]={} l_uv[{cby4}]={} r={} d={:x}", nb.a_uvmode[cbx4], nb.l_uvmode[cby4], msac.rng, msac.dif); }
     let sctx_u = crate::av2_coef::skip_ctx_chroma(
         &nb.a[0], &nb.l[0], cbx4, cby4, cbw4, cbh4, 1, false, false,
     );
     if ct48 { crate::dlog!("[CT48] sctx_u={sctx_u} t_dim_ctx={t_dim_ctx} a[{cbx4}..+{cbw4}]={:?} l[{cby4}..+{cbh4}]={:?}", &nb.a[0][cbx4..cbx4+cbw4], &nb.l[0][cby4..cby4+cbh4]); }
-    let cc96 = std::env::var("CC96").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 });
+    let cc96 = crate::env_get!("CC96").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 });
     if cc96 {
         crate::dlog!("[CC96] leaf bx4={bx4} by4={by4} uv_mode={uv_mode} cfl={cfl_mode} slw={slw} slh={slh} tx2dszctx={tx2dszctx} t_dim_ctx={t_dim_ctx} sctx_u={sctx_u} scan_len={} rng={} dif={:x}", scan.len(), msac.rng, msac.dif);
         crate::dlog!("[CC96] aU[{cbx4}..+{cbw4}]={:?} lU[{cby4}..+{cbh4}]={:?}", &nb.a[0][cbx4..cbx4 + cbw4], &nb.l[0][cby4..cby4 + cbh4]);
         crate::av2_coef::COEF_DBG.with(|c| c.set(true));
     }
     let mut cf_u = vec![0i32; 1usize << (slw + slh + 4)];
-    if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=1 txs={t_dim_ctx} skipctx={sctx_u} rng={}", msac.rng); }
+    if crate::env_is_set!("MTXB") { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=1 txs={t_dim_ctx} skipctx={sctx_u} rng={}", msac.rng); }
     let (u_eob, cf_ctx_u, cctx) = crate::av2_coef::decode_coefs_uv(
         msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_u, 1, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_u, 0, true, 0,
     );
     if cc96 { crate::av2_coef::COEF_DBG.with(|c| c.set(false)); crate::dlog!("[CC96] post-U eob={u_eob} rng={} dif={:x}", msac.rng, msac.dif); }
     if ct48 { crate::dlog!("[CT48] post-U u_eob={u_eob} r={}", msac.rng); }
-    if std::env::var("UVCFDIF").is_ok() { crate::dlog!("[UVCFDIF] y={by4} x={bx4} pl=0 eob={u_eob} dif={:x} rng={} cnt={}", msac.dif, msac.rng, msac.cnt); }
+    if crate::env_is_set!("UVCFDIF") { crate::dlog!("[UVCFDIF] y={by4} x={bx4} pl=0 eob={u_eob} dif={:x} rng={} cnt={}", msac.dif, msac.rng, msac.cnt); }
     // Off-frame clamp for the cf_ctx splat (dav2d recon_tmpl.c:1284): cells past the chroma
     // plane edge stay 0x40 or a later leaf's skip-ctx fold reads a stale level.
     let (csw, csh) = crate::av2_frame::FRAME.with(|f| {
@@ -2487,12 +2502,12 @@ pub fn decode_b_chroma(
         &nb.a[1], &nb.l[1], cbx4, cby4, cbw4, cbh4, 2, u_eob != -1, false,
     );
     let mut cf_v = vec![0i32; 1usize << (slw + slh + 4)];
-    if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=2 txs={t_dim_ctx} skipctx={sctx_v} rng={}", msac.rng); }
+    if crate::env_is_set!("MTXB") { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=2 txs={t_dim_ctx} skipctx={sctx_v} rng={}", msac.rng); }
     let (v_eob, cf_ctx_v, _) = crate::av2_coef::decode_coefs_uv(
         msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_v, 2, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_v, 0, true, 0,
     );
     if ct48 { crate::dlog!("[CT48] sctx_v={sctx_v} post-V v_eob={v_eob} r={}", msac.rng); }
-    if std::env::var("UVCFDIF").is_ok() { crate::dlog!("[UVCFDIF] y={by4} x={bx4} pl=1 eob={v_eob} dif={:x} rng={} cnt={}", msac.dif, msac.rng, msac.cnt); }
+    if crate::env_is_set!("UVCFDIF") { crate::dlog!("[UVCFDIF] y={by4} x={bx4} pl=1 eob={v_eob} dif={:x} rng={} cnt={}", msac.dif, msac.rng, msac.cnt); }
     nb.a[1][cbx4..cbx4 + cbw4s].fill(cf_ctx_v);
     nb.l[1][cby4..cby4 + cbh4s].fill(cf_ctx_v);
     // C-chroma recon (frame-1 intra): predict + residual into the FRAME chroma planes, score vs REF.
@@ -2535,7 +2550,7 @@ pub fn decode_chroma_mode(
     let (uv_mode, uv_angle): (u8, i32) = if is_cfl {
         let (cbw4, cbh4) = ((bd[0] as usize >> ssh).max(1), (bd[1] as usize >> ssv).max(1));
         let mhccp_allowed = cbw4.max(cbh4) <= 8 && cbw4 * cbh4 >= 2;
-        if std::env::var("MCFL").is_ok() { crate::dlog!("[MCFLSW2] mi=({bx4},{by4}) allowed={} cell={:?} rng={}", mhccp_allowed as u8, cdf.m.mhccp, msac.rng); }
+        if crate::env_is_set!("MCFL") { crate::dlog!("[MCFLSW2] mi=({bx4},{by4}) allowed={} cell={:?} rng={}", mhccp_allowed as u8, cdf.m.mhccp, msac.rng); }
         if mhccp_allowed && rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.mhccp) {
             let sz_ctx = SIZE_GROUP[bs] as usize;
             mh_dir = rav1d_msac_decode_symbol_adapt4(msac, &mut cdf.m.mhccp_filter_dir[sz_ctx], 2) as u8;
@@ -2577,7 +2592,7 @@ pub fn decode_chroma_mode(
             (DEFAULT_MODE_LIST_UV[i.min(7)], 0)
         }
     };
-    let (cbw4m, cbh4m) = ((bd[0] as usize >> 1).max(1), (bd[1] as usize >> 1).max(1));
+    let (cbw4m, cbh4m) = ((bd[0] as usize >> ssh).max(1), (bd[1] as usize >> ssv).max(1));
     cnb.a_uvmode[cbx4..cbx4 + cbw4m].fill(uv_mode);
     cnb.l_uvmode[cby4..cby4 + cbh4m].fill(uv_mode);
     ChromaMode { uv_mode, uv_angle, cfl_mode, cfl_alpha_u, cfl_alpha_v, mh_dir }
@@ -2612,7 +2627,7 @@ fn decode_chroma_coefs(
     luma_txtp: u8,
 ) -> ChromaCoefs {
     crate::prof_scope!(1);
-    if std::env::var("HANGCP").is_ok() { crate::dlog!("[CP]   chroma-coefs enter"); }
+    if crate::env_is_set!("HANGCP") { crate::dlog!("[CP]   chroma-coefs enter"); }
     let bd = crate::av2_decode::BLOCK_DIMENSIONS[bs];
     let (ssh, ssv) = ss_g();
     let (slw, slh) = ((bd[2] as usize).saturating_sub(ssh), (bd[3] as usize).saturating_sub(ssv));
@@ -2658,12 +2673,12 @@ fn decode_chroma_coefs(
         crate::av2_frame::FRAME.with(|f| f.borrow_mut().mark_db_chroma(cbx4, cby4, cbw4, cbh4));
     }
     let sctx_u = crate::av2_coef::skip_ctx_chroma(&cnb.a[0], &cnb.l[0], cbx4, cby4, cbw4, cbh4, 1, false, false);
-    let d240 = std::env::var("DBG00").is_ok() && bx4 == 96 && by4 == 32;
-    let dcc = std::env::var("CCDBG").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 });
+    let d240 = crate::env_is_set!("DBG00") && bx4 == 96 && by4 == 32;
+    let dcc = crate::env_get!("CCDBG").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 });
     if dcc { crate::dlog!("[CC] pre-u bx4={bx4} by4={by4} slw={slw} slh={slh} tx2dszctx={tx2dszctx} sctx_u={sctx_u} tx_class={tx_class} scan[0..8]={:?} rng={} dif={:x}", &scan[..8.min(scan.len())], msac.rng, msac.dif); }
     if d240 { crate::dlog!("CC240 pl=U sctx={sctx_u} tctx={t_dim_ctx} cbw4={cbw4} cbh4={cbh4} cbx4={cbx4} cby4={cby4} a[{cbx4}..{}]={:?} l[{cby4}..{}]={:?} (dav sctx=6)", cbx4+cbw4, &cnb.a[0][cbx4..cbx4+cbw4], cby4+cbh4, &cnb.l[0][cby4..cby4+cbh4]); }
     let mut cf_u = vec![0i32; 1usize << (slw + slh + 4)];
-    if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=1 txs={t_dim_ctx} skipctx={sctx_u} rng={}", msac.rng); }
+    if crate::env_is_set!("MTXB") { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=1 txs={t_dim_ctx} skipctx={sctx_u} rng={}", msac.rng); }
     let (u_eob, cfc_u, cctx) = crate::av2_coef::decode_coefs_uv(msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_u, 1, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_u, u_skip_set, intra, tx_class);
     if d240 { crate::dlog!("CC240 pl=U DONE u_eob={u_eob} rng={} dif={:x}", msac.rng, msac.dif); }
     if dcc {
@@ -2674,7 +2689,7 @@ fn decode_chroma_coefs(
     cnb.l[0][cby4..cby4 + cbh4s].fill(cfc_u);
     let sctx_v = crate::av2_coef::skip_ctx_chroma(&cnb.a[1], &cnb.l[1], cbx4, cby4, cbw4, cbh4, 2, u_eob != -1, false);
     let mut cf_v = vec![0i32; 1usize << (slw + slh + 4)];
-    if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=2 txs={t_dim_ctx} skipctx={sctx_v} rng={}", msac.rng); }
+    if crate::env_is_set!("MTXB") { crate::dlog!("[MTXB] mi=({bx4},{by4}) pl=2 txs={t_dim_ctx} skipctx={sctx_v} rng={}", msac.rng); }
     let (_v_eob, cfc_v, _) = crate::av2_coef::decode_coefs_uv(msac, &mut cdf.coef, &mut cdf.m.cctx, &mut cf_v, 2, t_dim_ctx, slw, slh, tx2dszctx, scan, sctx_v, 0, intra, tx_class);
     cnb.a[1][cbx4..cbx4 + cbw4s].fill(cfc_v);
     cnb.l[1][cby4..cby4 + cbh4s].fill(cfc_v);
@@ -2852,7 +2867,7 @@ fn opfl_pred_luma(
                                       (sw4 + 2) * 4, (sh4 + 2) * 4, mvp[n].y - 32, mvp[n].x - 32, wins[n]);
                     }
                     let (dy, dx) = sad_refine_mv(&p[0], p_stride, &p[1], p_stride, sw4 * 4, sh4 * 4, refine_mv == 2);
-                    if std::env::var("RMVREF").is_ok() {
+                    if crate::env_is_set!("RMVREF") {
                         crate::dlog!("[DREF] b=({bx4},{by4}) sub=({x},{y}) mvp0=({},{}) mvp1=({},{}) d=({dy},{dx}) p00={} p11={}",
                             mvp[0].y, mvp[0].x, mvp[1].y, mvp[1].x, p[0][2 * p_stride + 2], p[1][2 * p_stride + 2]);
                     }
@@ -2881,7 +2896,7 @@ fn opfl_pred_luma(
                                               (left[i].clamp(0, w_px - 1), (left[i] + (sw4 * 4) as i32 + 7).clamp(1, w_px),
                                                top[i].clamp(0, h_px - 1), (top[i] + (sh4 * 4) as i32 + 7).clamp(1, h_px)));
                                 }
-                                if std::env::var("OPFLDBG").is_ok() && ((bx4 == 83 && by4 == 10) || (bx4 == 81 && by4 == 10) || (bx4 == 12 && by4 == 0)) {
+                                if crate::env_is_set!("OPFLDBG") && ((bx4 == 83 && by4 == 10) || (bx4 == 81 && by4 == 10) || (bx4 == 12 && by4 == 0)) {
                                     crate::dlog!("[MOPFL] cell=({},{}) dydx=({dy},{dx}) mv0=({},{}) mv1=({},{})",
                                         (bx4 + x + bx) * 4, (by4 + y + by) * 4, mv[0].y, mv[0].x, mv[1].y, mv[1].x);
                                 }
@@ -3022,6 +3037,13 @@ fn opfl_pred_luma(
     bacp && have_bacp
 }
 
+thread_local! {
+    /// tip_pred_luma's two bilinear pre-MC windows (64-stride, up to 24 rows). put_bilin_win
+    /// writes the whole pw x pw window and every later read stays inside it, so the buffers are
+    /// reused: a fresh pair of zeroed vectors per 8x8 cell was ~4,400 instructions each.
+    static TIP_PREMC: std::cell::RefCell<[Vec<i32>; 2]> = const { std::cell::RefCell::new([Vec::new(), Vec::new()]) };
+}
+
 /// dav2d `tip_pred` (recon_tmpl.c:2059), luma: per-8x8 rp_proj TIP MVs; on the opfl path a
 /// bilinear pre-MC + integer DMVR (`sad_refine_mv`) + optical-flow delta (`opfl_derive_mv` /
 /// `opfl_mv_adj`); dual 1/16-pel windowed prep MC (`mc_opfl`); avg (or bacp-mask) blend.
@@ -3071,6 +3093,14 @@ fn tip_pred_luma(
     let stride = t.stride;
     let sad8x8_thr: u32 = if frame_mode == 1 { 6 } else { 15 };
     let rmv_base = ((by4 & 31) >> 1) * 16 + ((bx4 & 31) >> 1);
+    let mut p = TIP_PREMC.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    if opfl {
+        for b in p.iter_mut() {
+            if b.len() < 64 * 24 {
+                b.resize(64 * 24, 0);
+            }
+        }
+    }
     crate::av2_frame::REF_PICS.with(|rp| {
         let pics = rp.borrow();
         let refp = [
@@ -3106,7 +3136,7 @@ fn tip_pred_luma(
                     left[i] = ((bx4 + x) * 4) as i32 + (cmv[i].x >> 3) - 3;
                 }
                 let cell = rmv_base + (y >> 1) * 16 + (x >> 1);
-                if std::env::var("TIPDBG").is_ok() && bx4 == 96 && by4 == 32 {
+                if crate::env_is_set!("TIPDBG") && bx4 == 96 && by4 == 32 {
                     crate::dlog!("[MTIP] cell=({},{}) tmv=({},{}) blkmv=({},{}) cmv0=({},{}) cmv1=({},{}) sf={:?}",
                         (bx4 + x) * 4, (by4 + y) * 4, tmv.y, tmv.x, block_mv.y, block_mv.x,
                         cmv[0].y, cmv[0].x, cmv[1].y, cmv[1].x, t.tip_sf);
@@ -3124,7 +3154,6 @@ fn tip_pred_luma(
                 if opfl {
                     // bilinear pre-MC: (step+2)*4 square at 1/8-pel, mv - 32 (4px up-left)
                     let pw = (step + 2) * 4;
-                    let mut p = [vec![0i32; 64 * pw], vec![0i32; 64 * pw]];
                     for i in 0..2 {
                         put_bilin_win(planes[i], &mut p[i], 64, ((bx4 + x) * 4) as i32, ((by4 + y) * 4) as i32,
                                       pw, pw, cmv[i].y - 32, cmv[i].x - 32, wins[i]);
@@ -3151,7 +3180,7 @@ fn tip_pred_luma(
                     };
                     cmv[0] = Mv { y: cmv[0].y * 2 + dd[0].1, x: cmv[0].x * 2 + dd[0].0 };
                     cmv[1] = Mv { y: cmv[1].y * 2 + dd[1].1, x: cmv[1].x * 2 + dd[1].0 };
-                    if std::env::var("TIPDBG").is_ok() && bx4 == 96 && by4 == 16 {
+                    if crate::env_is_set!("TIPDBG") && bx4 == 96 && by4 == 16 {
                         crate::dlog!("[MTIP2] cell=({},{}) sad={sad} thr={sad8x8_thr} dydx=({dy},{dx}) dd={dd:?} cmvR0=({},{}) cmvR1=({},{})",
                             (bx4 + x) * 4, (by4 + y) * 4, cmv[0].y, cmv[0].x, cmv[1].y, cmv[1].x);
                     }
@@ -3220,6 +3249,7 @@ fn tip_pred_luma(
             y += step;
         }
     });
+    TIP_PREMC.with(|c| *c.borrow_mut() = p);
     if bacp && have_bacp {
         SEG_SCRATCH.with(|sc| {
             let scr = sc.borrow();
@@ -3262,7 +3292,7 @@ fn recon_inter_chroma(
     // `bx4`/`by4` = LUMA block pos (for the warp matrix eval); `cpx`/`cpy`/`cw`/`ch` = the chroma
     // block's pixel origin + dims (for a sub-8×8 shared chroma these come from the 8×8 carrier).
     use crate::av2_frame::{INTER_SCORE_RC, REF_F2RECONC, REF_FRAME1};
-    if std::env::var("ICHR").is_ok() {
+    if crate::env_is_set!("ICHR") {
         let path = if tip.is_some() { "tip" } else if comp.is_some() { "comp" } else if forced { "forced" } else if warp_pred.is_some() { "warp" } else { "single" };
         let extra = comp.as_ref().map(|c| format!(" mv0=({},{}) mv1=({},{}) refs={:?} ct={} cwp={}", c.0[0].y, c.0[0].x, c.0[1].y, c.0[1].x, c.1, c.2, c.3)).unwrap_or_default();
         crate::dlog!("[ICHR] cpx={cpx} cpy={cpy} cw={cw} ch={ch} path={path} fmv=({},{}){extra}", fmv.y, fmv.x);
@@ -3367,7 +3397,7 @@ fn recon_inter_chroma(
                                         if !crate::av2_recon::work_tick("av2_recon:3222") { break; }
                                         let cell = rmv_base + (((y + by) >> 1) * 16) + ((x + bx) >> 1);
                                         let rmv0 = RMV.with(|rm| rm.borrow()[cell][0]);
-                                        if std::env::var("MRMVC").is_ok() && cby == 0 && pl == 0 {
+                                        if crate::env_is_set!("MRMVC") && cby == 0 && pl == 0 {
                                             crate::dlog!("[MRMVC] cell=({},{}) rmv0=[({},{}),({},{})] win0={:?} win1={:?} steps r={r_step} o={o_step}",
                                                 x + bx, y + by, rmv0[0].y, rmv0[0].x, rmv0[1].y, rmv0[1].x, win[0], win[1]);
                                         }
@@ -3377,7 +3407,7 @@ fn recon_inter_chroma(
                                                       ow4 * pxw, oh4 * pxh,
                                                       rmv0[i].y, rmv0[i].x, filter as usize, win[i]);
                                         }
-                                        if std::env::var("MRMVC").is_ok() && cby == 0 && pl == 0 {
+                                        if crate::env_is_set!("MRMVC") && cby == 0 && pl == 0 {
                                             let o = uvoffi + (x + bx) * pxw;
                                             crate::dlog!("[MRMVC2] cell=({},{}) tmp0={},{} tmp1={},{}", x + bx, y + by, tc[0][o], tc[0][o + 1], tc[1][o], tc[1][o + 1]);
                                         }
@@ -3417,7 +3447,7 @@ fn recon_inter_chroma(
                         crate::av2_inter::comp_w_avg(&mut buf, cw, &tc[0], &tc[1], cw, ch, bcwp as i32, bdmax_g());
                     }
                 } else if let Some(&(mvp, refs, ct, cwp, msign, ref segm, mstride, widx, wsign)) = comp.as_ref().filter(|_| !forced) {
-                    let icdbg = std::env::var("ICDBG").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == cpx && p[1] == cpy });
+                    let icdbg = crate::env_get!("ICDBG").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == cpx && p[1] == cpy });
                     // Compound carrier: dav's compound-inter chroma branch (recon 3716) blends the
                     // CARRIER's mv pair for the whole chroma region — NO per-sub-block loop even
                     // when forced (sub-8 carriers).
@@ -3601,7 +3631,7 @@ fn recon_inter_chroma(
                     });
                     let mut residual = crate::scratch::zeroed(n);
                     crate::av2_itx::inv_txfm_2d(&coeff, slw, slh, row_ty, col_ty, &mut residual);
-                    if std::env::var("CQD").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == cpx && p[1] == cpy }) {
+                    if crate::env_get!("CQD").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == cpx && p[1] == cpy }) {
                         crate::dlog!("[CQD] pl={pl} tw={tw} th={th} coeff_nz={:?} resid_r0={:?} resid_r1={:?} pred_r0={:?}",
                             coeff.iter().enumerate().filter(|(_, &v)| v != 0).map(|(i, &v)| (i, v)).collect::<Vec<_>>(),
                             &residual[..tw.min(32)], &residual[tw..tw + tw.min(32)],
@@ -3818,11 +3848,6 @@ fn bawp_morph(pred: &mut [i32], bx4: usize, by4: usize, bw4: usize, bh4: usize, 
         }
         alpha
     }
-    // n_edge_samples[have_above && have_left][lh4][lw4][above, left] (recon_tmpl.c:2789).
-    const NES: [[[[u8; 2]; 3]; 3]; 2] = [
-        [[[2, 2], [3, 2], [4, 2]], [[2, 3], [3, 3], [4, 3]], [[2, 4], [3, 4], [4, 4]]],
-        [[[2, 2], [2, 2], [4, 0]], [[2, 2], [3, 3], [3, 3]], [[0, 4], [3, 3], [4, 4]]],
-    ];
     let (w, h) = (bw4 * 4, bh4 * 4);
     // BAWP template availability is TILE-relative (dav recon_tmpl.c:2839 `bx > tiling.col_start`).
     let tbawp = TILE_B.with(|t| t.get());
@@ -3845,12 +3870,40 @@ fn bawp_morph(pred: &mut [i32], bx4: usize, by4: usize, bw4: usize, bh4: usize, 
     if !(ref_y + sb_h4 * 4 <= fh && ref_x + sb_w4 * 4 <= fw && ref_y - 1 >= 0 && ref_x - 1 >= 0) {
         return 256;
     }
-    let lw4 = (ulog2(bw4 as u32).min(2)) as usize;
-    let lh4 = (ulog2(bh4 as u32).min(2)) as usize;
-    let idx = (have_above && have_left) as usize;
-    let n_above = if have_above { NES[idx][lh4][lw4][0] as i32 } else { 0 };
-    let n_left = if have_left { NES[idx][lh4][lw4][1] as i32 } else { 0 };
-    let count_l2 = n_above + if n_above == n_left { (n_above != 0) as i32 } else { n_left };
+    // avm derive_bawp_parameters, luma: each side uses the block's IN-FRAME extent (`ref_w`/`ref_h`)
+    // capped at 16 samples, padded up to a power of two by repeating from its start, and sampled
+    // every `step`. A block past the bottom or right edge must not read rows or columns beyond the
+    // coded area.
+    const LOG2_BAWP: [usize; 17] = [0, 0, 0, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4];
+    const LOG_TO_SIZE: [usize; 5] = [0, 2, 4, 8, 16];
+    let bw = ((sb_w4 * 4).max(0) as usize).min(16);
+    let bh = ((sb_h4 * 4).max(0) as usize).min(16);
+    let width = LOG_TO_SIZE[LOG2_BAWP[bw]];
+    let height = LOG_TO_SIZE[LOG2_BAWP[bh]];
+    let (above_ok, left_ok) = (have_above && width != 0, have_left && height != 0);
+    // derive_number_ref_samples_bawp
+    let (numb_up, numb_left) = if above_ok && left_ok {
+        if width == 16 && height == 16 {
+            (16, 16)
+        } else if width > 4 && height > 4 {
+            (8, 8)
+        } else if width < 16 && height < 16 {
+            (4, 4)
+        } else if width == 16 {
+            (16, 0)
+        } else {
+            (0, 16)
+        }
+    } else if above_ok {
+        (width, 0)
+    } else if left_ok {
+        (0, height)
+    } else {
+        (0, 0)
+    };
+    let count = numb_up + numb_left;
+    // Every reachable count is a power of two (or zero).
+    let count_l2 = if count == 0 { 0 } else { count.trailing_zeros() as i32 };
     let (mut sx, mut sy, mut sxy, mut sx2) = (0i64, 0i64, 0i64, 0i64);
     crate::av2_frame::FRAME.with(|fr| {
         crate::av2_frame::REF_FRAME1.with(|rf| {
@@ -3866,28 +3919,24 @@ fn bawp_morph(pred: &mut [i32], bx4: usize, by4: usize, bw4: usize, bh4: usize, 
                 f.pl[0].px.get(y.max(0) as usize * fstride + x.max(0) as usize).copied().unwrap_or(0) as i64
             };
             let getr = |x: i32, y: i32| -> i64 { rp.at(x as usize, y as usize) as i64 };
-            if n_above != 0 {
-                let bw = 4i32 << lw4;
-                let step = bw >> n_above;
-                let mut i = step >> 1;
-                while i < bw {
-                    if !crate::av2_recon::work_tick("av2_recon:3594") { break; }
-                    let (x, y) = (getr(ref_x + i, ref_y - 1), getf(bx4 as i32 * 4 + i, by4 as i32 * 4 - 1));
-                    sx += x; sy += y; sxy += x * y; sx2 += x * x;
+            let (cx, cy) = (bx4 as i32 * 4, by4 as i32 * 4);
+            let mut side = |n: usize, len: usize, pad: usize, at: &dyn Fn(i32) -> (i64, i64)| {
+                if n == 0 {
+                    return;
+                }
+                let step = pad / n;
+                let mut i = if step == 1 { 0 } else { step >> 1 };
+                while i < pad {
+                    let (x, y) = at((i % len) as i32);
+                    sx += x;
+                    sy += y;
+                    sxy += x * y;
+                    sx2 += x * x;
                     i += step;
                 }
-            }
-            if n_left != 0 {
-                let bh = 4i32 << lh4;
-                let step = bh >> n_left;
-                let mut i = step >> 1;
-                while i < bh {
-                    if !crate::av2_recon::work_tick("av2_recon:3604") { break; }
-                    let (x, y) = (getr(ref_x - 1, ref_y + i), getf(bx4 as i32 * 4 - 1, by4 as i32 * 4 + i));
-                    sx += x; sy += y; sxy += x * y; sx2 += x * x;
-                    i += step;
-                }
-            }
+            };
+            side(numb_up, bw, width, &|i| (getr(ref_x + i, ref_y - 1), getf(cx + i, cy - 1)));
+            side(numb_left, bh, height, &|i| (getr(ref_x - 1, ref_y + i), getf(cx - 1, cy + i)));
         })
     });
     let (sx, sy, sxy, sx2) = (sx as i32, sy as i32, sxy as i32, sx2 as i32);
@@ -4075,7 +4124,7 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
         if morph {
             intrabc_morph_luma(&f.pl[0], &mut pred, bx4, by4, w, h, bv);
         }
-        if std::env::var("MPROBE2").is_ok() && bx4 * 4 == 192 && by4 * 4 == 48 {
+        if crate::env_is_set!("MPROBE2") && bx4 * 4 == 192 && by4 * 4 == 48 {
             crate::dlog!("[MPROBE2] px=(192,48) w={w} h={h} bv={bv:?} az={all_zero} eob={luma_eob} stx={luma_stx} txtp={luma_txtp} slw={slw} slh={slh} qidx={} dcq={} nz={:?} pred_row0={:?}",
                 LAST_QIDX.with(|c| c.get()), crate::av2_frame::F2_DCQ.with(|c| c.get()[0]),
                 luma_cf.iter().take(96).enumerate().filter(|(_, &v)| v != 0).map(|(i, &v)| (i, v)).collect::<Vec<_>>(),
@@ -4100,7 +4149,7 @@ fn recon_intrabc(bx4: usize, by4: usize, bw4: usize, bh4: usize, slw: usize, slh
             let dcq = crate::av2_frame::F2_DCQ.with(|c| c.get()[0]);
             let residual = build_residual(dequant(luma_cf, w, h, luma_txtp, dcq, 0), w, h, luma_txtp, slw, slh, luma_stx, luma_eob);
             crate::av2_itx::residual_add(&mut pred, w, &residual, w, h, 0, 0, 0, bdmax_g());
-            if std::env::var("MPROBE2").is_ok() && bx4 * 4 == 192 && by4 * 4 == 48 {
+            if crate::env_is_set!("MPROBE2") && bx4 * 4 == 192 && by4 * 4 == 48 {
                 crate::dlog!("[MPROBE2] res_row0={:?} recon_row0={:?}", &residual[..8], &pred[..8]);
             }
         }
@@ -4218,7 +4267,7 @@ pub fn decode_leaf(
     // (incl. cbs=-1) ⇒ dav2d forces b->intra=0 with NO is_inter symbol (decode.c:1679).
     let has_chroma = cbs != -1;
     let forced_inter = cbs != bs as i32;
-    if std::env::var("MTRACE2").is_ok() { crate::dlog!("[IL] y={by4} x={bx4} bs={bs} intra_region={intra_region} forced_inter={forced_inter} cbs={cbs} r={} d={:x}", msac.rng, msac.dif); }
+    if crate::env_is_set!("MTRACE2") { crate::dlog!("[IL] y={by4} x={bx4} bs={bs} intra_region={intra_region} forced_inter={forced_inter} cbs={cbs} r={} d={:x}", msac.rng, msac.dif); }
 
     // SDP intra-region leaf: forced intra, luma-only, NO is_inter symbol (dav2d 1695). fsc uses
     // the neighbour-sum ctx (inter_frame=false) since `IS_INTER && !intra_region` is false here.
@@ -4235,7 +4284,7 @@ pub fn decode_leaf(
                 luma_dir_map[(yy & 15) * 16 + (xx & 15)] = info.midx;
             }
         }
-        if std::env::var("SBTRACE").is_ok() { crate::dlog!("SBLEAF-LUMA ({bx4},{by4}) bs={bs} midx={} rng={} dif={:x}", info.midx, msac.rng, msac.dif); }
+        if crate::env_is_set!("SBTRACE") { crate::dlog!("SBLEAF-LUMA ({bx4},{by4}) bs={bs} midx={} rng={} dif={:x}", info.midx, msac.rng, msac.dif); }
         // Intra block splats intra=1 + base inter state (ref0=0 unavailable, motion_mode=0),
         // else a later block reads a stale ref/warp neighbour (its is_inter/warp_ctx go wrong).
         splat_inter_nb(a_nb, l_nb, bx4, by4, bw4, bh4, 1, 0, 0, 0, 0, 0, -1);
@@ -4261,10 +4310,10 @@ pub fn decode_leaf(
     {
         let ctx = get_skip_mode_ctx(a_nb, l_nb, nx_sm);
         let v = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.skip_mode[ctx]);
-        if std::env::var("MLEAF").is_ok() { crate::dlog!("[MLEAF] mi=({bx4},{by4}) skip_mode={} ctx={ctx} rng={}", v as u8, msac.rng); }
+        if crate::env_is_set!("MLEAF") { crate::dlog!("[MLEAF] mi=({bx4},{by4}) skip_mode={} ctx={ctx} rng={}", v as u8, msac.rng); }
         v
     } else {
-        if std::env::var("MLEAF").is_ok() { crate::dlog!("[MLEAF] mi=({bx4},{by4}) skip_mode NOT-CODED (area {} intra_region={intra_region})", bw4 * bh4); }
+        if crate::env_is_set!("MLEAF") { crate::dlog!("[MLEAF] mi=({bx4},{by4}) skip_mode NOT-CODED (area {} intra_region={intra_region})", bw4 * bh4); }
         false
     };
 
@@ -4274,7 +4323,7 @@ pub fn decode_leaf(
     } else {
         let ictx = get_intra_ctx(a_nb, l_nb, nx_sm, nctx_sm);
         let vi = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.intra[ictx]);
-        if std::env::var("MLEAF").is_ok() { crate::dlog!("[MLEAF] mi=({bx4},{by4}) is_inter={} ictx={ictx} rng={} cell={:?} cnt={} dif={:x}", vi as u8, msac.rng, cdf.m.intra[ictx], msac.cnt, msac.dif); }
+        if crate::env_is_set!("MLEAF") { crate::dlog!("[MLEAF] mi=({bx4},{by4}) is_inter={} ictx={ictx} rng={} cell={:?} cnt={} dif={:x}", vi as u8, msac.rng, cdf.m.intra[ictx], msac.cnt, msac.dif); }
         !vi
     };
 
@@ -4348,7 +4397,7 @@ pub fn decode_leaf(
                     BANK.with(|bk| { let st = SEQ_TOOLS.with(|c| c.get()); let b = bk.borrow(); refmvs_find(&g.borrow(), bx4, by4, bw4, bh4, r0, r1, z, z, sb_step4(), col_end, row_end, st.drl_reorder, if st.refmvbank { Some(&b) } else { None }, 3, skip_mode) })
                 })
             };
-            let dump_stk = std::env::var("MSTK2").map_or(false, |v| v == "all" || v == format!("{bx4},{by4}"));
+            let dump_stk = crate::env_get!("MSTK2").map_or(false, |v| v == "all" || v == format!("{bx4},{by4}"));
             let (stack, _cnt) = if !comp {
                 let r = find1(eref0, -1);
                 if dump_stk {
@@ -4358,7 +4407,7 @@ pub fn decode_leaf(
                 r
             } else if skip_mode || info.inter_mode > 19 {
                 let (s, c) = find1(info.ref0 as i8, info.ref1);
-                if std::env::var("RMVC").is_ok() {
+                if crate::env_is_set!("RMVC") {
                     for (n, e) in s.iter().take(c).enumerate() {
                         crate::dlog!("RMVC {bx4} {by4} {n}/{c} y={} x={} y2={} x2={} w={} cwp={}", e.mv[0].y, e.mv[0].x, e.mv[1].y, e.mv[1].x, e.weight, e.cwp);
                     }
@@ -4370,7 +4419,7 @@ pub fn decode_leaf(
                     e.mv[1] = e.mv[0];
                     e.weight *= 0x101;
                 }
-                if std::env::var("RMVC").is_ok() {
+                if crate::env_is_set!("RMVC") {
                     for (n, e) in s.iter().take(c).enumerate() {
                         crate::dlog!("RMVZ {bx4} {by4} 0 {n}/{c} y={} x={} w={}", e.mv[0].y, e.mv[0].x, e.weight & 0xff);
                         crate::dlog!("RMVZ {bx4} {by4} 1 {n}/{c} y={} x={} w={}", e.mv[1].y, e.mv[1].x, (e.weight >> 8) & 0xff);
@@ -4384,7 +4433,7 @@ pub fn decode_leaf(
                     s[n].mv[1] = s2[n].mv[0];
                     s[n].weight = (s[n].weight & 0xff) | (s2[n].weight << 8);
                 }
-                if std::env::var("RMVC").is_ok() {
+                if crate::env_is_set!("RMVC") {
                     for n in 0..c.max(c2) {
                         if n < c {
                             crate::dlog!("RMVZ {bx4} {by4} 0 {n}/{c} y={} x={} w={}", s[n].mv[0].y, s[n].mv[0].x, s[n].weight & 0xff);
@@ -4466,7 +4515,7 @@ pub fn decode_leaf(
             let _ = cwp;
             // RMVFIN harness: mine's final MV per inter block (vs oracle DMV). Broaden the
             // `by4 < 60` gate to all blocks to re-measure the full-frame MV match.
-            if std::env::var("RMVFIN").is_ok() {
+            if crate::env_is_set!("RMVFIN") {
                 let oh = crate::av2_recon::CUR_FRAME_REF.with(|c| c.get().0);
                 if comp {
                     crate::dlog!("RMVFIN oh{oh} {bx4} {by4} {} {} | {} {}", fmv.y, fmv.x, fmv1.y, fmv1.x);
@@ -4833,7 +4882,7 @@ pub fn decode_leaf(
             {
                 let (w, h) = (bw4 * 4, bh4 * 4);
                 luma_pred = vec![0i32; w * h];
-                if std::env::var("OPFLDBG").is_ok() && ((bx4 == 83 && by4 == 10) || (bx4 == 81 && by4 == 10) || (bx4 == 12 && by4 == 0)) {
+                if crate::env_is_set!("OPFLDBG") && ((bx4 == 83 && by4 == 10) || (bx4 == 81 && by4 == 10) || (bx4 == 12 && by4 == 0)) {
                     crate::dlog!("[MBLK] mi=({bx4},{by4}) bw4={bw4} bh4={bh4} tip={} comp={comp} im={} rmv={} ct={} r0={} r1={} fmv=({},{}) fmv1=({},{})",
                         info.is_tip as u8, info.inter_mode, info.refine_mv, info.comp_type, info.ref0, info.ref1, fmv.y, fmv.x, fmv1.y, fmv1.x);
                 }
@@ -4959,7 +5008,7 @@ pub fn decode_leaf(
                             }
                         }
                     }
-                    if std::env::var("MPB").map_or(false, |v| v == format!("{bx4},{by4},{}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
+                    if crate::env_get!("MPB").map_or(false, |v| v == format!("{bx4},{by4},{}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
                         crate::dlog!("[MPB] mi=({bx4},{by4}) mvp={:?} refs={:?} cwp={cwp} bacp={bacp_state} comp_type={} t0row0={:?} t1row0={:?} out={:?}", mvp, refs, info.comp_type, &t[0][..8], &t[1][..8], &luma_pred[..8]);
                     }
                     comp_preds = Some((mvp, refs, cwp));
@@ -4983,12 +5032,12 @@ pub fn decode_leaf(
                 }
             }
         }
-        if std::env::var("MMVP").map_or(false, |v| v == "all" || v.parse::<u32>().ok() == Some(crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
+        if crate::env_get!("MMVP").map_or(false, |v| v == "all" || v.parse::<u32>().ok() == Some(crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
             let mv1 = comp_preds.map_or(crate::av2_refmvs::Mv { y: 0, x: 0 }, |c| c.0[1]);
             crate::dlog!("[MMVPA] f={} mi=({bx4},{by4}) mode={} mv0=({},{}) mv1=({},{}) ref=({},{}) mm={} ii={} wri={} bawp={}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()), info.inter_mode, fmv.y, fmv.x, mv1.y, mv1.x, info.ref0, info.ref1, info.motion_mode, info.ii_mode, info.warp_ref_idx, info.bawp);
             crate::dlog!("[MMVP] mi=({bx4},{by4}) fmv=({},{}) fmv1=({},{}) drl=({},{}) filt={} warp={:?} refinemv={} mode={} comp={} ii={}", fmv.y, fmv.x, info.mv_y1, info.mv_x1, info.drl_idx, info.drl_idx1, info.filter, warp_pred, info.refine_mv as u8, info.inter_mode, comp_preds.is_some() as u8, info.ii_mode);
         }
-        let d240 = std::env::var("DBG00").is_ok() && ((bx4 == 96 && by4 == 32) || (bx4 == 0 && by4 == 1) || (bx4 == 2 && by4 == 2) || (bx4 == 96 && by4 == 44));
+        let d240 = crate::env_is_set!("DBG00") && ((bx4 == 96 && by4 == 32) || (bx4 == 0 && by4 == 1) || (bx4 == 2 && by4 == 2) || (bx4 == 96 && by4 == 44));
         // Also capture the luma txtp: an inter block's chroma INHERITS it (dav2d recon 3643/3657).
         // ===== TX PARTITION (dav decode.c:3324: read_tx_part AFTER the subpel filter) +
         // per-unit inter luma coefs/itx. Under LARGEST mode part==NONE and the single unit ==
@@ -5017,7 +5066,7 @@ pub fn decode_leaf(
                 let ubw4 = if fw4i > ubx4 { utw4.min(fw4i - ubx4) } else { utw4 };
                 let ubh4 = if fh4i > uby4 { uth4.min(fh4i - uby4) } else { uth4 };
                 let sctx = crate::av2_coef::skip_ctx_luma(&a_nb.lcoef[ubx4..], &l_nb.lcoef[uby4..], uslw, uslh, &bd) as usize;
-                if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({ubx4},{uby4}) pl=0 txs={u_tdc} skipctx={sctx} rng={}", msac.rng); }
+                if crate::env_is_set!("MTXB") { crate::dlog!("[MTXB] mi=({ubx4},{uby4}) pl=0 txs={u_tdc} skipctx={sctx} rng={}", msac.rng); }
                 let az = rav1d_msac_decode_bool_adapt(msac, &mut cdf.coef.skip[1][u_tdc][sctx]);
                 if d240 { crate::dlog!("C240 luma all_zero={} sctx={sctx} tctx={u_tdc} rng={} dif={:x}", az as u8, msac.rng, msac.dif); }
                 let ucfc = if az {
@@ -5039,7 +5088,7 @@ pub fn decode_leaf(
                     r
                 };
                 cf_ctx = ucfc;
-                if std::env::var("ILSP").is_ok() && bx4 == 48 && by4 == 0 { crate::dlog!("[ILSP] mi=({bx4},{by4}) unit=({ux},{uy}) {utw4}x{uth4} ucfc={ucfc:x} nlay={} rng={}", tx_layout.len(), msac.rng); }
+                if crate::env_is_set!("ILSP") && bx4 == 48 && by4 == 0 { crate::dlog!("[ILSP] mi=({bx4},{by4}) unit=({ux},{uy}) {utw4}x{uth4} ucfc={ucfc:x} nlay={} rng={}", tx_layout.len(), msac.rng); }
                 if tx_layout.len() > 1 {
                     // per-UNIT lcoef ctx splat (the next unit's skip/dc-sign ctx reads it)
                     for x in ubx4..(ubx4 + ubw4).min(fw4i) { a_nb.lcoef[x] = ucfc; }
@@ -5152,7 +5201,7 @@ pub fn decode_leaf(
                 // frame-2 deblock filters this block's boundaries (the intra path does this via
                 // recon_intra_luma; the inter path must do it too).
                 f.mark_coded(bx4, by4, bw4, bh4, 0);
-                if std::env::var("RECONDBG").is_ok() {
+                if crate::env_is_set!("RECONDBG") {
                     crate::av2_frame::REF_F2RECON.with(|r| {
                         if let Some(rp) = r.borrow().as_ref() {
                             'chk: for yy in 0..(bh4 * 4) {
@@ -5212,17 +5261,17 @@ pub fn decode_leaf(
         // Oracle emits LEAFDIF from the luma tx cf read (not called for block-level skip); mirror
         // so the frame-2 inter luma verification stream aligns with dav2d's.
         if !info.skip {
-            if std::env::var("SBTRACE").is_ok() { crate::dlog!("LEAFDIF ({bx4},{by4}) bs={bs} dif={:x} rng={}", msac.dif, msac.rng); }
+            if crate::env_is_set!("SBTRACE") { crate::dlog!("LEAFDIF ({bx4},{by4}) bs={bs} dif={:x} rng={}", msac.dif, msac.rng); }
         }
         if bx4 == 0 && by4 == 0 {
             crate::dlog!("SBL00 post-inter-luma skip={} rng={} dif={:x}", info.skip as u8, msac.rng, msac.dif);
         }
-        if std::env::var("HANGCP").is_ok() {
+        if crate::env_is_set!("HANGCP") {
             crate::dlog!("[CP] leaf ({bx4},{by4}) post-luma");
         }
         // Chroma coefs at the chroma block size/origin (== bs/bx4/by4 for a normal yuv leaf;
         // the shared 8x8-unit chroma for a sub-8x8 leaf that carries it). skip_set=1 (inter).
-        if std::env::var("HANGCP").is_ok() { crate::dlog!("[CP]   arm-select cc={} skip={} hc={}", chroma_cc.is_some(), info.skip as u8, has_chroma as u8); }
+        if crate::env_is_set!("HANGCP") { crate::dlog!("[CP]   arm-select cc={} skip={} hc={}", chroma_cc.is_some(), info.skip as u8, has_chroma as u8); }
         let chroma_coefs = if chroma_cc.is_some() {
             chroma_cc
         } else if !info.skip && has_chroma {
@@ -5250,7 +5299,7 @@ pub fn decode_leaf(
         } else {
             None
         };
-        if std::env::var("HANGCP").is_ok() { crate::dlog!("[CP]   post-arm"); }
+        if crate::env_is_set!("HANGCP") { crate::dlog!("[CP]   post-arm"); }
         // Stage E chroma RECON (MC prediction + optional residual). Grid-aligned yuv leaves (chroma
         // block == luma block) are bit-exact; sub-8×8 SHARED chroma (`cbs != bs`) needs dav's
         // shared-chroma MV/position rule (the carrier fmv gives small pred deltas) — deferred.
@@ -5262,7 +5311,7 @@ pub fn decode_leaf(
             let cbd_c = crate::av2_decode::BLOCK_DIMENSIONS[cbs as usize];
             let (sshc, ssvc) = ss_g();
             let (cw, ch) = ((cbd_c[0] as usize * 4) >> sshc, (cbd_c[1] as usize * 4) >> ssvc);
-            if std::env::var("HANGCP").is_ok() { crate::dlog!("[CP]   chroma-recon enter cw={cw} ch={ch} cbs={cbs}"); }
+            if crate::env_is_set!("HANGCP") { crate::dlog!("[CP]   chroma-recon enter cw={cw} ch={ch} cbs={cbs}"); }
             let (cpx, cpy) = ((ccbx4 * 4) >> sshc, (ccby4 * 4) >> ssvc);
             // Chroma BAWP (dav `b->bawp[1]`, a SEPARATE bit from luma bawp): morph the chroma with
             // the reused luma alpha. Gated on `bawp_chroma`, NOT `bawp` (luma) — they can differ.
@@ -5300,7 +5349,7 @@ pub fn decode_leaf(
             // Sub-PU deblock CHROMA layer — AFTER the chroma recon (recon_inter_chroma's
             // mark_db_chroma writes the chroma edge grids; the caps must land on top of them).
             let dcfg2 = crate::av2_frame::DEBLOCK_CFG.with(|c| c.get());
-            if dcfg2.sub_pu && std::env::var("NOSPC").is_err() {
+            if dcfg2.sub_pu && !crate::env_is_set!("NOSPC") {
                 let spl2 = subpu_flt_lvl(false, true, info.is_tip, info.ref1 >= 0, info.inter_mode, info.refine_mv != 0, info.comp_type == 1, bw4, bh4);
                 if spl2 < 3 {
                     let fm2 = HDR_TOOL_CFG.with(|c| c.get().tip_frame_mode) == 2;
@@ -5387,9 +5436,9 @@ pub fn decode_leaf(
             // and flip when the bank state changes. Re-add it once the SB32/48 warp-cascade root is
             // fixed so the total metric is judgeable. See [[rav2d-refmvs-find]].
         } else {
-        if std::env::var("MLEAF").is_ok() { crate::dlog!("[MLEAF] mi=({bx4},{by4}) post-luma-mode rng={}", msac.rng); }
+        if crate::env_is_set!("MLEAF") { crate::dlog!("[MLEAF] mi=({bx4},{by4}) post-luma-mode rng={}", msac.rng); }
         let cm = decode_chroma_mode(msac, cdf, cnb, bs, bx4, by4, info.midx);
-        if std::env::var("MLEAF").is_ok() { crate::dlog!("[MLEAF] mi=({bx4},{by4}) post-chroma-mode uv={} cfl={} mh={} rng={}", cm.uv_mode, cm.cfl_mode, cm.mh_dir, msac.rng); }
+        if crate::env_is_set!("MLEAF") { crate::dlog!("[MLEAF] mi=({bx4},{by4}) post-chroma-mode uv={} cfl={} mh={} rng={}", cm.uv_mode, cm.cfl_mode, cm.mh_dir, msac.rng); }
         if bx4 == 0 && by4 == 6 { crate::dlog!("SBL06 post-chroma-mode fsc={} rng={} dif={:x} (oracle pre_coef rng=36272)", info.fsc as u8, msac.rng, msac.dif); }
         // --- palette (defer path): the JOINT intra leaf reads palette AFTER the chroma mode
         // (avm read_intra_frame_mode_info order y→uv→palette), then the color-index map
@@ -5404,7 +5453,7 @@ pub fn decode_leaf(
                 let n = crate::msac::rav1d_msac_decode_symbol_adapt8(msac, &mut cdf.m.pal_sz, 6) as usize + 2;
                 let bd_bits = if bdmax_g() > 255 { 10u8 } else { 8 };
                 let colors = crate::av2_palette::read_palette_colors_y(msac, bd_bits, n, bx4, by4, have_left, have_top);
-                if std::env::var("MPAL").is_ok() { crate::dlog!("[MPAL] mi=({bx4},{by4}) n={n} colors={:?} rng={} (defer)", &colors[..n], msac.rng); }
+                if crate::env_is_set!("MPAL") { crate::dlog!("[MPAL] mi=({bx4},{by4}) n={n} colors={:?} rng={} (defer)", &colors[..n], msac.rng); }
                 palette = Some(crate::av2_palette::PaletteBlock { n, colors, map: Vec::new(), w: bw4 * 4, h: bh4 * 4 });
             }
             let bw4cl = bw4.min(col_end.saturating_sub(bx4));
@@ -5417,7 +5466,7 @@ pub fn decode_leaf(
                 p.map = crate::av2_palette::decode_color_map(
                     msac, &mut cdf.m.pal_idx_identity, &mut cdf.m.pal_idx, p.n, p.w, p.h, rows, cols,
                 ).expect("palette color map (defer)");
-                if std::env::var("MPAL").is_ok() { crate::dlog!("[MPAL] mi=({bx4},{by4}) map done rng={} (defer)", msac.rng); }
+                if crate::env_is_set!("MPAL") { crate::dlog!("[MPAL] mi=({bx4},{by4}) map done rng={} (defer)", msac.rng); }
             }
         }
         // ===== TX PARTITION (dav decode.c:2328: read AFTER the full intra mode info incl. the
@@ -5444,7 +5493,7 @@ pub fn decode_leaf(
             } else {
                 crate::av2_coef::skip_ctx_luma(&a_nb.lcoef[ubx4..], &l_nb.lcoef[uby4..], uslw, uslh, &bd) as usize
             };
-            if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({ubx4},{uby4}) pl=0y txs={u_tdc} skipctx={sctx} rng={}", msac.rng); }
+            if crate::env_is_set!("MTXB") { crate::dlog!("[MTXB] mi=({ubx4},{uby4}) pl=0y txs={u_tdc} skipctx={sctx} rng={}", msac.rng); }
             let az = rav1d_msac_decode_bool_adapt(msac, &mut cdf.coef.skip[skip_set][u_tdc][sctx]);
             if bx4 == 0 && by4 == 6 { crate::dlog!("SBL06 luma all_zero={} skip_set={skip_set} sctx={sctx} tctx={u_tdc} rng={}", az as u8, msac.rng); }
             let mut cf = vec![0i32; 1usize << (uslw + uslh + 4)];
@@ -5463,11 +5512,11 @@ pub fn decode_leaf(
                     y_mode_raw
                 };
                 let dc_sign_ctx = crate::av2_coef::get_dc_sign_ctx(&a_nb.lcoef[ubx4..], &l_nb.lcoef[uby4..], uslw, uslh, ubw4 as i32, ubh4 as i32);
-                if std::env::var("CYAT").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 }) {
+                if crate::env_get!("CYAT").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 }) {
                     crate::dlog!("[CYAT] mi=({bx4},{by4}) e={e} dcsctx={dc_sign_ctx} uslw={uslw} uslh={uslh} u2d={u2d} rng={} dif={:x} a={:x?} l={:x?}", msac.rng, msac.dif, &a_nb.lcoef[ubx4..ubx4+16.min(a_nb.lcoef.len()-ubx4)], &l_nb.lcoef[uby4..uby4+8.min(l_nb.lcoef.len()-uby4)]);
                 }
                 let (r, txtp, stxt, stxs) = decode_coefs_y(msac, cdf, &mut cf, e, info.fsc, y_mode, uslw.min(uslh), u_tdc, uslw, uslh, u2d, scan, false, dc_sign_ctx);
-                if std::env::var("CYAT").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 }) {
+                if crate::env_get!("CYAT").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 }) {
                     crate::dlog!("[CYAT] mi=({bx4},{by4}) post-y txtp={txtp} rng={} dif={:x}", msac.rng, msac.dif);
                 }
                 (r, txtp, stxt, stxs)
@@ -5488,7 +5537,7 @@ pub fn decode_leaf(
             None => decode_chroma_coefs(msac, cdf, cnb, bs, bx4, by4, info.fsc as usize, true, DCT_DCT),
         };
         // Frame-2 intra LUMA RECON: per-unit chained prediction from the assembled FRAME.
-        if std::env::var("BRDBG").is_ok() && bx4 >= 94 && by4 >= 48 {
+        if crate::env_is_set!("BRDBG") && bx4 >= 94 && by4 >= 48 {
             crate::dlog!("LEAF-RECON ({bx4},{by4}) bw4={bw4} bh4={bh4} midx={} ymode={}", info.midx, info.y_mode_idx);
         }
         for (ux, uy, uslw, uslh, cf, u_txtp, u_stxt, u_stxs, u_az) in &iunits {
@@ -5536,7 +5585,7 @@ pub fn decode_leaf(
             crate::av2_refmvs::GRID.with(|g| g.borrow_mut().splat_intra(bx4, by4, bw4, bh4, bs as u8));
         }
     }
-    if std::env::var("SBTRACE").is_ok() { crate::dlog!("SBLEAF ({bx4},{by4}) bs={bs} intra={} rng={} dif={:x}", intra as u8, msac.rng, msac.dif); }
+    if crate::env_is_set!("SBTRACE") { crate::dlog!("SBLEAF ({bx4},{by4}) bs={bs} intra={} rng={} dif={:x}", intra as u8, msac.rng, msac.dif); }
 }
 
 /// Recursively decode a **mixed-region** superblock partition sub-tree (dav2d `decode_sb`,
@@ -5582,7 +5631,7 @@ pub fn decode_sb_inter(
     let have_v = ih4 > by4 + hh4;
     // dav2d 3947: when the luma block matches the chroma block size, the chroma origin is here.
     let (cbx4, cby4) = if bs as i32 == cbs { (bx4, by4) } else { (cbx4, cby4) };
-    let sbdbg = std::env::var("SBI").is_ok();
+    let sbdbg = crate::env_is_set!("SBI");
     let r_in = msac.rng;
     let iss = ss_g();
     let (bp, _half) = decode_partition(msac, &mut cdf.m, bs, a_part, l_part, bx4, by4, have_h, have_v, 3, true, 0, iss.0 as u32, iss.1 as u32, iw4, ih4, !intra_region);
@@ -5762,7 +5811,7 @@ pub fn decode_sb_inter(
     // Region root: after the luma subtree, decode ONE chroma block for the region (dav2d 4231).
     if is_region_root {
         let (uv, _ang) = decode_b_chroma(msac, cdf, cnb, luma_dir_map, bs, bx4, by4);
-        if std::env::var("SBTRACE").is_ok() { crate::dlog!("SBRGN-CHROMA ({bx4},{by4}) bs={bs} uv_mode={uv} rng={} dif={:x}", msac.rng, msac.dif); }
+        if crate::env_is_set!("SBTRACE") { crate::dlog!("SBRGN-CHROMA ({bx4},{by4}) bs={bs} uv_mode={uv} rng={} dif={:x}", msac.rng, msac.dif); }
     }
 }
 
@@ -5837,7 +5886,7 @@ pub fn decode_sb_chroma(
     // Chroma-tree half of the [PARTIN] probe. avm's PARTPROBE emits BOTH trees into one stream
     // (luma nodes, then the SDP chroma tree restarting at the SB origin), so this has to fire too
     // or the two traces cannot be aligned past the first SB.
-    if std::env::var("PARTIN").is_ok() {
+    if crate::env_is_set!("PARTIN") {
         crate::dlog!("[PARTINC] mi=({bx4},{by4}) bs={bs} rng={} dif={:x}", msac.rng, msac.dif);
     }
     // SDP chroma root (64x64): F164 inference from the luma `dir_ptr`. If luma did not
@@ -5859,7 +5908,7 @@ pub fn decode_sb_chroma(
             decode_partition(msac, &mut cdf.m, bs, a_part, l_part, bx4, by4, have_h_split, have_v_split, 3, true, 1, css.0 as u32, css.1 as u32, iw4, ih4, false);
         p
     };
-    if std::env::var("DBLK444").is_ok() && bx4 * 4 >= 176 && bx4 * 4 <= 216 && by4 * 4 >= 104 && by4 * 4 <= 128 {
+    if crate::env_is_set!("DBLK444") && bx4 * 4 >= 176 && bx4 * 4 <= 216 && by4 * 4 >= 104 && by4 * 4 <= 128 {
         crate::dlog!("[MSBC] ({},{}) bs={bs} bw={} bh={} bp={bp:?}", bx4 * 4, by4 * 4, bw4 * 4, bh4 * 4);
     }
     // F157: at the chroma 64x64 root, CfL is disallowed for the SB when the chroma split
@@ -5875,7 +5924,7 @@ pub fn decode_sb_chroma(
         };
         let luma_dir = (luma_dirptr & 0x3) as i32;
         nb.sdp_cfl_disallowed = chroma_dir != -1 && chroma_dir != luma_dir;
-        if std::env::var("F157DBG").is_ok() {
+        if crate::env_is_set!("F157DBG") {
             crate::dlog!("[F157] ({bx4},{by4}) bp={bp:?} cdir={chroma_dir} ldir={luma_dir} dirptr={luma_dirptr:x} disallow={}", nb.sdp_cfl_disallowed);
         }
     }
@@ -6286,7 +6335,7 @@ fn recon_dir_idif(
         lbuf[i] = left[n - 1];
     }
 
-    if std::env::var("MIE2").is_ok() && p == 70 && w == 4 && h == 8 && !chroma {
+    if crate::env_is_set!("MIE2") && p == 70 && w == 4 && h == 8 && !chroma {
         crate::dlog!("[MIE2RAW] sm_sep={sm_separate} asm={} lsm={} ab={:?} le={:?}", above_sm as u8, left_sm as u8, &abuf[AO - 1..AO + 13], &lbuf[AO - 1..AO + 13]);
     }
     // avm edge filtering (skipped for p==90/180; only if seq edge filter enabled).
@@ -6324,7 +6373,7 @@ fn recon_dir_idif(
     if crate::av2_ipred::DIR_DBG.with(|c| c.get()) {
         crate::dlog!("[MDIRD] p={p} ef={ef} chroma={chroma} apply_ibp={apply_ibp} sm_sep={sm_separate} lbuf_postfilt={:?}", &lbuf[AO - 1..(AO + (w + h)).min(lbuf.len())]);
     }
-    let mie2 = std::env::var("MIE2").is_ok() && p == 70 && w == 4 && h == 8 && !chroma;
+    let mie2 = crate::env_is_set!("MIE2") && p == 70 && w == 4 && h == 8 && !chroma;
     if mie2 {
         crate::dlog!("[MIE2] pang={p} ab={:?} le={:?}", &abuf[AO - 1..AO + 13], &lbuf[AO - 1..AO + 13]);
     }
@@ -6478,7 +6527,7 @@ fn recon_dir_mrl(
         src, px0, py0, w, h, py0 as i32 - 1 - above_mrl_idx, px0 as i32 - 1 - mrl, corner_cnt,
         sb_bnd, have_top, have_left, n_tr, n_bl, base,
     );
-    let mrldbg = std::env::var("MRLDBG").is_ok_and(|v| {
+    let mrldbg = crate::env_get!("MRLDBG").is_some_and(|v| {
         let mut it = v.split(',');
         it.next() == Some(&px0.to_string()) && it.next() == Some(&py0.to_string())
     });
@@ -6612,10 +6661,10 @@ fn recon_intra_luma(
     if !crate::av2_frame::RECON_ACTIVE.with(|a| a.get()) {
         return;
     }
-    if std::env::var("BRDBG").is_ok() && bx4 >= 94 && by4 >= 48 {
+    if crate::env_is_set!("BRDBG") && bx4 >= 94 && by4 >= 48 {
         crate::dlog!("BRINTRA ({bx4},{by4}) bw4={bw4} bh4={bh4} hl={have_left} ht={have_top} all_zero={all_zero} ymode={y_mode_idx} midx={parse_midx}");
     }
-    if std::env::var("RILTRACE").is_ok() {
+    if crate::env_is_set!("RILTRACE") {
         crate::dlog!("[RIL] ({bx4},{by4}) {bw4}x{bh4} ymode={y_mode_idx} midx={parse_midx} mrl={mrl_index} az={all_zero}");
     }
     let (w, h) = (4usize << slw, 4usize << slh);
@@ -6702,7 +6751,7 @@ fn recon_intra_luma(
             } else {
                 0
             };
-            if std::env::var("MINTRA").is_ok() {
+            if crate::env_is_set!("MINTRA") {
                 crate::dlog!("[MINTRA] fn={} y={by4} x={bx4} bw4={bw4} bh4={bh4} ntr={} nbl={} mode={y_mode} pang={p_angle} mrl={mrl_index} midx={recon_midx}",
                     crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()), n_tr / 4, n_bl / 4);
             }
@@ -6712,7 +6761,7 @@ fn recon_intra_luma(
         };
         let above_sm = f.smooth_at(blk_org.0 as i32, blk_org.1 as i32 - 1);
         let left_sm = f.smooth_at(blk_org.0 as i32 - 1, blk_org.1 as i32);
-        if std::env::var("MDCP").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 }) {
+        if crate::env_get!("MDCP").map_or(false, |v| { let p: Vec<usize> = v.split(',').map(|x| x.parse().unwrap()).collect(); p[0] == bx4 && p[1] == by4 }) {
             let tr: Vec<i32> = (0..8).map(|i| f.pl[0].at(bx4 * 4 + i, by4 * 4 - 1)).collect();
             let lc: Vec<i32> = (0..8).map(|i| f.pl[0].at(bx4 * 4 - 1, by4 * 4 + i)).collect();
             crate::dlog!("[MDCP] fn={} ({bx4},{by4}) w={w} h={h} ymode={y_mode} asm={} lsm={} ibp={} jointa={} jointl={} ntr={n_tr} nbl={n_bl} havet={have_top} havel={have_left} top={tr:?} left={lc:?}",
@@ -6723,7 +6772,7 @@ fn recon_intra_luma(
         // gather_edges' bounds — dav edge-replicates off-frame neighbours, it does NOT use the
         // real off-frame recon that RECON_PAD holds. Byte-exact for BOTH the keyframe and inter
         // frames. (REF_LUMA crutch retained purely as an isolation-harness override when loaded.)
-        let selfref = std::env::var("SELFREF").is_ok();
+        let selfref = crate::env_is_set!("SELFREF");
         let (top, left, corner) = crate::av2_frame::REF_LUMA.with(|r| {
             let rb = r.borrow();
             if let Some(rp) = rb.as_ref().filter(|_| !selfref) {
@@ -6762,7 +6811,7 @@ fn recon_intra_luma(
                 }
             }
             1..=8 if mrl_index == 0 => {
-                if std::env::var("MRLDBG").is_ok_and(|v| v == format!("{px0},{py0}")) {
+                if crate::env_get!("MRLDBG").is_some_and(|v| v == format!("{px0},{py0}")) {
                     crate::dlog!("MRLDBG arm=idif mode={y_mode} pang={p_angle} mrl={mrl_index}");
                 }
                 // Faithful AV2 IDIF directional prediction (avm build_intra_predictors_default +
@@ -6803,7 +6852,7 @@ fn recon_intra_luma(
         if !all_zero {
             use crate::av2_dequant::{cf_max, dequant_coeff, dq_lookup};
             let dq = dq_lookup(LAST_QIDX.with(|c| c.get())); // delta-q: current SB's qindex (== frame yac when off)
-            if std::env::var("MPROBE").is_ok() && px0 <= 349 && 349 < px0 + w && py0 <= 29 && 29 < py0 + h {
+            if crate::env_is_set!("MPROBE") && px0 <= 349 && 349 < px0 + w && py0 <= 29 && 29 < py0 + h {
                 crate::dlog!("[MPROBE] px0={px0} py0={py0} w={w} h={h} mode={y_mode_idx} qidx={} dq={dq} dcq={} stx={stx_type} txtp={txtp} nz={:?}",
                     LAST_QIDX.with(|c| c.get()), crate::av2_frame::F2_DCQ.with(|c| c.get()[0]),
                     cf.iter().take(64).enumerate().filter(|(_, &v)| v != 0).map(|(i, &v)| (i, v)).collect::<Vec<_>>());
@@ -6824,7 +6873,7 @@ fn recon_intra_luma(
                     let s = (lvl < 0) as u32;
                     let q = if i == 0 && dcq != 0 { dcq } else { dq };
                     let q = crate::av2_qm::qm_apply(iqm, i, h.min(32), q);
-                    if std::env::var("MDQ").is_ok() && bx4 == 16 && by4 == 0 {
+                    if crate::env_is_set!("MDQ") && bx4 == 16 && by4 == 0 {
                         crate::dlog!("[MDQ] i={i} lvl={lvl} q={q} w={w} h={h} iqm={:?} txtp={txtp} fsc={}", iqm.map(|(m, mw)| (m[i], mw)), fsc as u8);
                     }
                     let mag0 = dequant_coeff(lvl.unsigned_abs(), q, 3, cfmax, s, false) as i32;
@@ -6842,7 +6891,7 @@ fn recon_intra_luma(
                 let scan = crate::av2_tables_gen::SCANS[scan_idx_square(slw.min(3), slh.min(3))];
                 crate::av2_stx::apply_stx(&mut coeff, scan, w, h, crate::av2_stx::intra_transpose(stx_mode), stx_type, stx_set, bdmax);
             }
-            if std::env::var("MDQDUMP").map_or(false, |v| v == format!("{bx4},{by4}")) {
+            if crate::env_get!("MDQDUMP").map_or(false, |v| v == format!("{bx4},{by4}")) {
                 let nz: Vec<(usize, i32)> = coeff.iter().enumerate().filter(|(_, &v)| v != 0).map(|(i, &v)| (i, v)).collect();
                 crate::dlog!("[MDQDUMP] ({bx4},{by4}) w={w} h={h} txtp={txtp} dq={dq} dcq={dcq} tx_scale={tx_scale} stx={stx_type} slw={slw} slh={slh} nz={nz:?}");
             }
@@ -6853,7 +6902,7 @@ fn recon_intra_luma(
             };
             let mut residual = crate::scratch::zeroed(n);
             crate::av2_itx::inv_txfm_2d(&coeff, slw, slh, row_ty, col_ty, &mut residual);
-            let dump_px = std::env::var("MDQDUMP").map_or(false, |v| v == format!("{bx4},{by4}"));
+            let dump_px = crate::env_get!("MDQDUMP").map_or(false, |v| v == format!("{bx4},{by4}"));
             if dump_px {
                 for r in 16..26.min(h) {
                     crate::dlog!("[MPX] r{r} pred=({},{}) res=({},{})", pred[r * w + 30], pred[r * w + 31], residual[r * w + 30], residual[r * w + 31]);
@@ -6905,7 +6954,7 @@ fn recon_intra_luma(
         mscore_luma("intra", px0, py0, w, h, &pred, w);
         // Debug (env BRDBG): print the bottom-right block's gathered neighbours + pred so the
         // DC-from-0 cascade ROOT is visible (the first block whose top/left is wrongly 0).
-        if std::env::var("BRDBG").is_ok() && px0 >= 384 && py0 >= 192 {
+        if crate::env_is_set!("BRDBG") && px0 >= 384 && py0 >= 192 {
             let t0 = *top.get(0).unwrap_or(&-1);
             let t1 = *top.get(1).unwrap_or(&-1);
             let l0 = *left.get(0).unwrap_or(&-1);
@@ -7081,7 +7130,7 @@ fn recon_cfl(
                 dc0 += l as i64;
                 dc1 += cu.at(px0 - 1, py0 + yc) as i64;
                 dc2 += cv.at(px0 - 1, py0 + yc) as i64;
-                if implicit && w == 32 && h == 8 && std::env::var("CFLA").is_ok() {
+                if implicit && w == 32 && h == 8 && crate::env_is_set!("CFLA") {
                     crate::dlog!("[MCFLD] L y={y} l={l} u={} v={}", cu.at(px0 - 1, py0 + yc), cv.at(px0 - 1, py0 + yc));
                 }
             }
@@ -7101,7 +7150,7 @@ fn recon_cfl(
                 dc0 += l as i64;
                 dc1 += cu.at(px0 + xc, py0 - 1) as i64;
                 dc2 += cv.at(px0 + xc, py0 - 1) as i64;
-                if implicit && w == 32 && h == 8 && std::env::var("CFLA").is_ok() {
+                if implicit && w == 32 && h == 8 && crate::env_is_set!("CFLA") {
                     crate::dlog!("[MCFLD] T x={x} l={l} u={} v={}", cu.at(px0 + xc, py0 - 1), cv.at(px0 + xc, py0 - 1));
                 }
             }
@@ -7142,14 +7191,14 @@ fn recon_cfl(
         let den = (sxx - ((sx * sx) >> count_l2)) as i32;
         a_u = derive_alpha((sxyu - ((sx * syu) >> count_l2)) as i32, den, 0);
         a_v = derive_alpha((sxyv - ((sx * syv) >> count_l2)) as i32, den, 0);
-        if std::env::var("CFLA").is_ok() {
+        if crate::env_is_set!("CFLA") {
             crate::dlog!("[MCFLA] w={w} h={h} nt={n_top} nl={n_left} dc={},{},{} au={a_u} av={a_v} den={den} edge={:?}", d0, d1, d2, edge);
         }
     } else {
         a_u = alpha_u_raw * 32; // CFL_ALPHA_LOG2 = 5
         a_v = alpha_v_raw * 32;
     }
-    if std::env::var("CFLT").is_ok_and(|v| v == format!("{px0},{py0}")) {
+    if crate::env_get!("CFLT").is_some_and(|v| v == format!("{px0},{py0}")) {
         crate::dlog!("[CFLT] px=({px0},{py0}) {w}x{h} has_t={has_t} has_l={has_l} impl={implicit} d0={d0} d1={d1} d2={d2} au={a_u} av={a_v} topsb={is_top_sb_edge}");
     }
     // combine
@@ -7404,7 +7453,7 @@ fn recon_mhccp(
     };
     let alpha_u = solve(au, mati);
     let alpha_v = solve(av, mati);
-    if std::env::var("CMH").is_ok() {
+    if crate::env_is_set!("CMH") {
         crate::dlog!("[CMH] px0={px0} py0={py0} w={w} h={h} dir={dir} bd={bd} n={} mat0={:?} mat1={:?} mat2={:?} au={au:?} av={av:?} alpha_u={alpha_u:?} alpha_v={alpha_v:?}",
             imat0.len(), mati[0], mati[1], mati[2]);
     }
@@ -7440,7 +7489,7 @@ fn recon_mhccp(
                 let v1 = sqrnd(cur);
                 let val = mul32(alpha[0], v0, 16) + mul32(alpha[1], v1, 16) + a2v;
                 dst[y * w + x] = val.clamp(0, bdmax);
-                if y == 0 && x < 6 && std::env::var("CMH").is_ok() {
+                if y == 0 && x < 6 && crate::env_is_set!("CMH") {
                     crate::dlog!("[MPX] y={y} x={x} v0={v0} v1={v1} cur={cur} out={}", dst[y * w + x]);
                 }
             }
@@ -7482,7 +7531,7 @@ fn recon_intra_chroma(
     }
     let (w, h) = (4usize << slw, 4usize << slh);
     let (px0, py0) = (cbx4 * 4, cby4 * 4);
-    if std::env::var("CMODE").is_ok() {
+    if crate::env_is_set!("CMODE") {
         crate::dlog!("[CMODE] cpx={px0} cpy={py0} w={w} h={h} uv_mode={uv_mode} cfl={cfl_mode} mh={mh_dir} au={cfl_alpha_u} av={cfl_alpha_v}");
     }
     FRAME.with(|fr| {
@@ -7503,7 +7552,7 @@ fn recon_intra_chroma(
             (f.yac, f.bitdepth_max, f.pl[1].stride, f.edge_filter, f.ibp);
         let base = (bdmax + 1) >> 1; // 1 << (bitdepth - 1)
         let is_dir = (1..=8).contains(&uv_mode) && cfl_mode == 0;
-        if std::env::var("MUVM").map_or(false, |v| { let pp: Vec<usize> = v.split(",").filter_map(|x| x.parse().ok()).collect(); pp.len() == 2 && pp[0] == px0 && pp[1] == py0 }) {
+        if crate::env_get!("MUVM").map_or(false, |v| { let pp: Vec<usize> = v.split(",").filter_map(|x| x.parse().ok()).collect(); pp.len() == 2 && pp[0] == px0 && pp[1] == py0 }) {
             crate::dlog!("[MUVM] f={} px=({px0},{py0}) {w}x{h} uv_mode={uv_mode} cfl={cfl_mode} mh={mh_dir} uv_angle={uv_angle} az_u={az_u} bx4={bx4} by4={by4} bw4={bw4} bh4={bh4}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()));
         }
         let p_angle = if is_dir { av2_p_angle(uv_mode, 3 * uv_angle, 0, w, h) } else { 0 };
@@ -7567,8 +7616,13 @@ fn recon_intra_chroma(
                     if yl.w != 0 {
                         let (mut pu, mut pv) = (vec![0i32; w * h], vec![0i32; w * h]);
                         if cfl_mode == 3 {
+                            // avm mhccp_implicit_fetch_neighbor_luma: the top-right (bottom-left)
+                            // samples join the model only when the LUMA transform is wider (taller)
+                            // than 4. Always true in 4:2:0; a 4-wide 4:4:4 block takes none.
+                            let mh_tr = if (w << ssh_a) > 4 { n_tr >> 2 } else { 0 };
+                            let mh_bl = if (h << ssv_a) > 4 { n_bl >> 2 } else { 0 };
                             recon_mhccp(yl, cu, cv, px0, py0, w, h, have_top, have_left,
-                                is_top_sb, mh_dir, n_tr >> 2, n_bl >> 2, bdmax, &mut pu, &mut pv);
+                                is_top_sb, mh_dir, mh_tr, mh_bl, bdmax, &mut pu, &mut pv);
                         } else {
                             recon_cfl(yl, cu, cv, px0, py0, by4, w, h, have_top, have_left,
                                 cfl_mode == 2, cfl_alpha_u, cfl_alpha_v, ds, bdmax, &mut pu, &mut pv);
@@ -7610,7 +7664,7 @@ fn recon_intra_chroma(
                         *v = last;
                     }
                 }
-                if std::env::var("MUVP").map_or(false, |v| v == format!("{cbx4},{cby4},{}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
+                if crate::env_get!("MUVP").map_or(false, |v| v == format!("{cbx4},{cby4},{}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
                     crate::dlog!("[MUVP] pl={pl} cpx=({px0},{py0}) {w}x{h} mode={uv_mode} ang={uv_angle} ntr={n_tr} nbl={n_bl} top={:?} left={:?}", &top[..(w + 4).min(top.len())], &left[..(h + 4).min(left.len())]);
                 }
                 // symmetric top clamp at the tile/frame right edge
@@ -7630,7 +7684,7 @@ fn recon_intra_chroma(
                 // CfL EXPLICIT/IMPLICIT full prediction (luma-AC applied).
                 pred.copy_from_slice(if pl == 0 { pu } else { pv });
             } else if cfl_mode != 0 || uv_mode == 0 {
-                if std::env::var("MUVM").map_or(false, |v| { let pp: Vec<usize> = v.split(",").filter_map(|x| x.parse().ok()).collect(); pp.len() == 2 && pp[0] == px0 && pp[1] == py0 }) {
+                if crate::env_get!("MUVM").map_or(false, |v| { let pp: Vec<usize> = v.split(",").filter_map(|x| x.parse().ok()).collect(); pp.len() == 2 && pp[0] == px0 && pp[1] == py0 }) {
                     crate::dlog!("[MUVME] pl={pl} ht={have_top} hl={have_left} top={:?} leftALL={:?}", &top[..8.min(top.len())], &left[..32.min(left.len())]);
                 }
                 // DC base (MHCCP → DC for now; DC uv_mode; CfL when luma ref unavailable).
@@ -7641,13 +7695,13 @@ fn recon_intra_chroma(
                     (false, false) => ipred_dc_128(&mut pred, w, w, h, bdmax),
                 }
                 // Chroma DC uses the IBP gradient blend too (avm applies IBP to the DC base).
-                if std::env::var("MUVM").map_or(false, |v| { let pp: Vec<usize> = v.split(",").filter_map(|x| x.parse().ok()).collect(); pp.len() == 2 && pp[0] == px0 && pp[1] == py0 }) {
+                if crate::env_get!("MUVM").map_or(false, |v| { let pp: Vec<usize> = v.split(",").filter_map(|x| x.parse().ok()).collect(); pp.len() == 2 && pp[0] == px0 && pp[1] == py0 }) {
                     crate::dlog!("[MUVMD] pl={pl} dc_pred0={} apply_ibp={apply_ibp}", pred[0]);
                 }
                 if apply_ibp && (have_top || have_left) {
                     ipred_ibp_dc(&mut pred, w, &top, &left, w, h, have_top, have_left);
                 }
-                if std::env::var("MUVM").map_or(false, |v| { let pp: Vec<usize> = v.split(",").filter_map(|x| x.parse().ok()).collect(); pp.len() == 2 && pp[0] == px0 && pp[1] == py0 }) {
+                if crate::env_get!("MUVM").map_or(false, |v| { let pp: Vec<usize> = v.split(",").filter_map(|x| x.parse().ok()).collect(); pp.len() == 2 && pp[0] == px0 && pp[1] == py0 }) {
                     crate::dlog!("[MUVMD] pl={pl} post_ibp pred0={} pred_r14={:?}", pred[0], &pred[14 * w..14 * w + 4]);
                 }
             } else {
@@ -7662,7 +7716,7 @@ fn recon_intra_chroma(
                         (false, false) => ipred_dc_128(&mut pred, w, w, h, bdmax),
                     },
                     1..=8 => {
-                        let dbg_on = std::env::var("MUVP").map_or(false, |v| v == format!("{cbx4},{cby4},{}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get())));
+                        let dbg_on = crate::env_get!("MUVP").map_or(false, |v| v == format!("{cbx4},{cby4},{}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get())));
                         crate::av2_ipred::DIR_DBG.with(|c| c.set(dbg_on));
                         recon_dir_idif(
                             &mut pred, w, h, &top, &left, corner, p_angle, uv_angle, 0,
@@ -7670,7 +7724,7 @@ fn recon_intra_chroma(
                         );
                         let _ = dir_ibp;
                         crate::av2_ipred::DIR_DBG.with(|c| c.set(false));
-                        if std::env::var("MUVP").map_or(false, |v| v == format!("{cbx4},{cby4},{}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
+                        if crate::env_get!("MUVP").map_or(false, |v| v == format!("{cbx4},{cby4},{}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get()))) {
                             crate::dlog!("[MUVPP] pl={pl} p={p_angle} ibp={apply_ibp} sm=({above_sm},{left_sm}) ef={ef} pred_r0={:?}", &pred[..w.min(32)]);
                             crate::dlog!("[MUVPP] pl={pl} pred_r1={:?}", &pred[w..w + w.min(32)]);
                         }
@@ -7732,7 +7786,7 @@ fn recon_intra_chroma(
                 let row_ty = T1D[(uvtt & 7) as usize & 3];
                 let col_ty = T1D[((uvtt >> 5) & 7) as usize & 3];
                 crate::av2_itx::inv_txfm_2d(&coeff, slw, slh, row_ty, col_ty, &mut residual);
-                if px0 == 96 && py0 == 72 && std::env::var("CMH").is_ok() {
+                if px0 == 96 && py0 == 72 && crate::env_is_set!("CMH") {
                     crate::dlog!("[MRES] pl={pl} dq={dq} cfmax={cfmax} txs={tx_scale} lvl0..4={:?} coef0..4={:?} res_r0={:?} pred_r0={:?}",
                         &cf[..4.min(cf.len())], &coeff[..4], &residual[..4], &pred[..4]);
                 }
@@ -7776,7 +7830,7 @@ fn recon_intra_chroma(
             let (u, v, t) = s.get();
             s.set((u + ok_u as u32, v + ok_v as u32, t + 1));
         });
-        if !(ok_u && ok_v) && std::env::var("CREFDBG").is_ok() {
+        if !(ok_u && ok_v) && crate::env_is_set!("CREFDBG") {
             crate::dlog!(
                 "CREFMISS px=({px0},{py0}) w={w} h={h} uvmode={uv_mode} cfl={cfl_mode} ang={} azU={} azV={} okU={} okV={}",
                 if is_dir { p_angle } else { -1 }, az_u as u8, az_v as u8, ok_u as u8, ok_v as u8
@@ -8199,7 +8253,7 @@ pub fn decode_b_inter(
     // derives its refs (skip_mode_refs / neighbour override), inter_mode=NEARMV_NEARMV, no subpel.
     skip_mode: bool,
 ) -> InterInfo {
-    if std::env::var("MPREDRL").is_ok() {
+    if crate::env_is_set!("MPREDRL") {
         crate::dlog!("[MBEG] mi=({bx4},{by4}) rng={}", msac.rng);
     }
     use crate::msac::{
@@ -8233,9 +8287,9 @@ pub fn decode_b_inter(
     // skip_txfm ctx adds skip_mode*3 (dav2d decode.c:1747) — a skip_mode block picks the +3 CDF cell.
     let sctx = get_skip_txfm_ctx(a, l, nx, skip_mode as u8);
     let skip = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.skip_txfm[sctx]);
-    let dbg00 = std::env::var("DBG00").is_ok() && ((bx4 == 0 && by4 == 0) || (bx4 == 0 && by4 == 1) || (bx4 == 2 && by4 == 2) || (bx4 == 2 && by4 == 1) || (bx4 == 1 && by4 == 2) || (bx4 == 96 && by4 == 32) || (bx4 == 12 && by4 == 14) || (bx4 == 14 && by4 == 12) || (bx4 == 20 && by4 == 0) || (bx4 == 24 && by4 == 2) || (bx4 == 30 && by4 == 14) || (bx4 == 30 && by4 == 12) || (bx4 == 76 && by4 == 4) || (bx4 == 0 && by4 == 2));
+    let dbg00 = crate::env_is_set!("DBG00") && ((bx4 == 0 && by4 == 0) || (bx4 == 0 && by4 == 1) || (bx4 == 2 && by4 == 2) || (bx4 == 2 && by4 == 1) || (bx4 == 1 && by4 == 2) || (bx4 == 96 && by4 == 32) || (bx4 == 12 && by4 == 14) || (bx4 == 14 && by4 == 12) || (bx4 == 20 && by4 == 0) || (bx4 == 24 && by4 == 2) || (bx4 == 30 && by4 == 14) || (bx4 == 30 && by4 == 12) || (bx4 == 76 && by4 == 4) || (bx4 == 0 && by4 == 2));
     if dbg00 { crate::dlog!("[D0] === block ({bx4},{by4}) bs={bs} skip_mode={skip_mode} r_enter={} ==", msac.rng); }
-    let dv2 = std::env::var("DV2").is_ok() && ((bx4 == 4 && by4 == 0) || (bx4 == 0 && by4 == 24) || (bx4 == 32 && by4 == 4) || (bx4 == 96 && by4 == 44) || (bx4 == 2 && by4 == 4) || (bx4 == 96 && by4 == 20) || (bx4 == 64 && by4 == 0));
+    let dv2 = crate::env_is_set!("DV2") && ((bx4 == 4 && by4 == 0) || (bx4 == 0 && by4 == 24) || (bx4 == 32 && by4 == 4) || (bx4 == 96 && by4 == 44) || (bx4 == 2 && by4 == 4) || (bx4 == 96 && by4 == 20) || (bx4 == 64 && by4 == 0));
     // The frame's mv_precision is per-FRAME (obu.c:1392) — read from HDR_TOOL_CFG, not the
     // hardcoded caller constant (2). v432 f2=2 (unchanged), v320 f2=3. Seeds mv_prec + rem index.
     let frame_mv_precision = HDR_TOOL_CFG.with(|c| c.get().mv_precision) as i32;
@@ -8346,7 +8400,7 @@ pub fn decode_b_inter(
             }
         }
         if dbg00 || dv2 { crate::dlog!("[D0] skip_mode drl={drl} r={}", msac.rng); }
-        if std::env::var("MSKM").is_ok() { crate::dlog!("[MSKM] mi=({bx4},{by4}) drl={drl} fn={}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get())); }
+        if crate::env_is_set!("MSKM") { crate::dlog!("[MSKM] mi=({bx4},{by4}) drl={drl} fn={}", crate::av2_frame::DECODE_FRAME_N.with(|c| c.get())); }
         // Ref pair derivation (dav2d decode.c:2494): default = f->skip_mode_refs (frame-level,
         // decode.c:5643: ref[0]=0, ref[1]=(skip_mode_enabled && n_ref>1 && |absd[0]-absd[1]|<=1)),
         // then the FIRST informative NX neighbour overrides: TIP → the tip source pair (not yet
@@ -8389,7 +8443,7 @@ pub fn decode_b_inter(
         splat_nb(&mut a.mrl, &mut l.mrl, bx4, by4, bw4, bh4, 0);
         splat_nb(&mut a.multi_mrl, &mut l.multi_mrl, bx4, by4, bw4, bh4, 0);
         splat_nb(&mut a.intrabc, &mut l.intrabc, bx4, by4, bw4, bh4, 0);
-        if std::env::var("MPREDRL").is_ok() { crate::dlog!("[MEND] mi=({bx4},{by4}) rng={} skip={} skip_mode={}", msac.rng, skip as u8, skip_mode as u8); }
+        if crate::env_is_set!("MPREDRL") { crate::dlog!("[MEND] mi=({bx4},{by4}) rng={} skip={} skip_mode={}", msac.rng, skip as u8, skip_mode as u8); }
         return InterInfo {
             skip, inter_mode: NEARMV, motion_mode: MM_TRANSLATION, mvprec_def: 1,
             mv_y: 0, mv_x: 0, warp_ref_idx: 0, drl_idx: drl, mv_prec: frame_mv_precision,
@@ -8833,7 +8887,7 @@ pub fn decode_b_inter(
         splat_nb(&mut a.mrl, &mut l.mrl, bx4, by4, bw4, bh4, 0);
         splat_nb(&mut a.multi_mrl, &mut l.multi_mrl, bx4, by4, bw4, bh4, 0);
         splat_nb(&mut a.intrabc, &mut l.intrabc, bx4, by4, bw4, bh4, 0);
-        if std::env::var("MPREDRL").is_ok() { crate::dlog!("[MEND] mi=({bx4},{by4}) rng={} skip={} skip_mode={}", msac.rng, skip as u8, skip_mode as u8); }
+        if crate::env_is_set!("MPREDRL") { crate::dlog!("[MEND] mi=({bx4},{by4}) rng={} skip={} skip_mode={}", msac.rng, skip as u8, skip_mode as u8); }
         return InterInfo {
             skip, inter_mode, motion_mode, mvprec_def,
             mv_y: mvs[0].0, mv_x: mvs[0].1, warp_ref_idx: 0, drl_idx: drl_idx[0],
@@ -8896,7 +8950,7 @@ pub fn decode_b_inter(
         let mut allow_warp = false;
         // dav2d decode.c:2965 gates allow_warp on the FRAME `warp_motion` flag, not seq motion_modes.
         if bw4.min(bh4) >= 2 && HDR_TOOL_CFG.with(|c| c.get().warp_motion) {
-            if std::env::var("MPREDRL").is_ok() {
+            if crate::env_is_set!("MPREDRL") {
                 crate::dlog!("[MWARP] mi=({bx4},{by4}) rng={}", msac.rng);
             }
             let ctx = get_warp_ctx(a, l, by4, bx4, have_top, have_left, have_top_right, have_bottom_left, bw4, bh4, ref0, is_sb_boundary, col_end);
@@ -9028,7 +9082,7 @@ pub fn decode_b_inter(
         let mut n = 0usize;
         let mut ctx = 0usize;
         if dbg00 { crate::dlog!("[D0] pre-drl sngl_ctx={sngl_ctx} cell={:?} rng={} dif={:x}", cdf.m.drl_idx[0][sngl_ctx], msac.rng, msac.dif); }
-        if std::env::var("MPREDRL").is_ok() {
+        if crate::env_is_set!("MPREDRL") {
             crate::dlog!("[MPREDRL] mi=({bx4},{by4}) mode={inter_mode} mctx={sngl_ctx} rng={} cell={:?}", msac.rng, cdf.m.drl_idx[0][sngl_ctx]);
         }
         while n < max_drl_bits {
@@ -9198,7 +9252,7 @@ pub fn decode_b_inter(
         filter = tool_cfg.subpel_filter_mode;
     }
 
-    if std::env::var("MPREDRL").is_ok() {
+    if crate::env_is_set!("MPREDRL") {
         crate::dlog!("[MEND] mi=({bx4},{by4}) rng={} skip={} skip_mode={}", msac.rng, skip as u8, skip_mode as u8);
     }
     // --- splat inter neighbour state ---
@@ -9377,7 +9431,9 @@ pub fn decode_luma_tx_level(
         let ey = e >> (2 + clw);
         let ex = e & ((4 << clw) - 1);
         let xy = ex + ey;
-        let (tw, th) = (bw4.min(8), bh4.min(8));
+        // avm get_lp2tx_ctx: the far-diagonal bound uses the TRANSFORM's size (64 capped to 32),
+        // not the frame-clipped extent; a 4x32 unit cut to 4x24 by the bottom edge still bounds at 32.
+        let (tw, th) = ((1usize << slw).min(8), (1usize << slh).min(8));
         let txtp_ctx = if xy < 2 {
             1
         } else if xy > 4 * (tw as i32 + th as i32) - 4 {
@@ -9521,7 +9577,7 @@ pub fn decode_b_luma(
     // Parsed-header tool gating (see HdrToolCfg): defaults keep the dev clip exact.
     let tool_cfg = HDR_TOOL_CFG.with(|c| c.get());
     let allow_intrabc = allow_intrabc && tool_cfg.allow_intrabc;
-    if std::env::var("MKEYL").is_ok() { crate::dlog!("[MKEYL] mi=({bx4},{by4}) bs={bs} rng={}", msac.rng); }
+    if crate::env_is_set!("MKEYL") { crate::dlog!("[MKEYL] mi=({bx4},{by4}) bs={bs} rng={}", msac.rng); }
     let p60 = ((bx4 == 6 && by4 == 0) || (bx4 == 0 && by4 == 6)) && allow_intrabc;
     // intrabc — only coded when allowed (off in inter frames) AND min(bw4,bh4) < 16.
     // dav2d decode.c:1727: the size gate uses the FULL block dims (dav bw4/bh4 = b_dim,
@@ -9529,13 +9585,13 @@ pub fn decode_b_luma(
     let intrabc = if allow_intrabc && w4.min(h4) < 16 {
         let ctx = nb_sum(&slots, &a.intrabc, &l.intrabc) as usize;
         let v = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.intrabc[ctx]);
-        if std::env::var("MIBC").is_ok() { crate::dlog!("[MIBC] mi=({bx4},{by4}) ctx={ctx} ibc={} rng={}", v as u8, msac.rng); }
+        if crate::env_is_set!("MIBC") { crate::dlog!("[MIBC] mi=({bx4},{by4}) ctx={ctx} ibc={} rng={}", v as u8, msac.rng); }
         if p60 { crate::dlog!("R60L intrabc ctx={ctx} DECODED={} rng={} dif={:x}", v as u8, msac.rng, msac.dif); }
-        if std::env::var("V320").is_ok() && bx4 == 0 && by4 == 0 { crate::dlog!("V300 intrabc ctx={ctx} v={} r={} (dav intrabc r=53240)", v as u8, msac.rng); }
-        if std::env::var("V64").is_ok() && bx4 == 64 && by4 == 24 { crate::dlog!("V64 intrabc ctx={ctx} v={} r={} (dav intrabc[ctx=2,1] r=34328)", v as u8, msac.rng); }
+        if crate::env_is_set!("V320") && bx4 == 0 && by4 == 0 { crate::dlog!("V300 intrabc ctx={ctx} v={} r={} (dav intrabc r=53240)", v as u8, msac.rng); }
+        if crate::env_is_set!("V64") && bx4 == 64 && by4 == 24 { crate::dlog!("V64 intrabc ctx={ctx} v={} r={} (dav intrabc[ctx=2,1] r=34328)", v as u8, msac.rng); }
         v
     } else {
-        if std::env::var("V320").is_ok() && bx4 == 0 && by4 == 0 { crate::dlog!("V300 intrabc NOT-DECODED (allow={allow_intrabc} mindim={})", bw4.min(bh4)); }
+        if crate::env_is_set!("V320") && bx4 == 0 && by4 == 0 { crate::dlog!("V300 intrabc NOT-DECODED (allow={allow_intrabc} mindim={})", bw4.min(bh4)); }
         false
     };
 
@@ -9553,7 +9609,7 @@ pub fn decode_b_luma(
         if ii < 2 { nx[ii] = (false, bx4 as i32); if ii == 0 { nx[1] = (false, bx4 as i32); } }
         let ctx = get_skip_txfm_ctx(a, l, nx, 0);
         let v = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.skip_txfm[ctx]);
-        if std::env::var("MIBC").is_ok() && bx4 == 64 && by4 == 0 { crate::dlog!("[MSEQ] post-skiptx skip={} ctx={ctx} rng={}", v as u8, msac.rng); }
+        if crate::env_is_set!("MIBC") && bx4 == 64 && by4 == 0 { crate::dlog!("[MSEQ] post-skiptx skip={} ctx={ctx} rng={}", v as u8, msac.rng); }
         v
     } else {
         false
@@ -9572,7 +9628,7 @@ pub fn decode_b_luma(
     if decode_filters {
         // TILE-ADAPTIVE units (avm): gdf block 128px→64px, ccso unit 256px→SB.
         let (ccso_u4, gdf_bs4) = FILTER_UNITS.with(|c| c.get());
-        if std::env::var("V320").is_ok() && bx4 == 0 && by4 == 0 { crate::dlog!("V300 filter-block gdf_gate={} cdef_gate={} r={} (dav: NO gdf/cdef for v320 f1 (0,0))", tool_cfg.gdf, tool_cfg.cdef, msac.rng); }
+        if crate::env_is_set!("V320") && bx4 == 0 && by4 == 0 { crate::dlog!("V300 filter-block gdf_gate={} cdef_gate={} r={} (dav: NO gdf/cdef for v320 f1 (0,0))", tool_cfg.gdf, tool_cfg.cdef, msac.rng); }
         if tool_cfg.gdf && (bx4 | by4) & (gdf_bs4 - 1) == 0 {
             let gdf = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.gdf);
             // C4: store this 128px GDF block's on/off flag for the filter pass.
@@ -9611,7 +9667,7 @@ pub fn decode_b_luma(
                 };
                 let v300_precdf = cdf.m.ccso[p][ctx][0];
                 left_ccso[p] = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.ccso[p][ctx]) as u8;
-                if std::env::var("V320").is_ok() && bx4 == 0 && by4 == 0 { crate::dlog!("V300 ccso p={p} ctx={ctx} v={} r={} pre_cdf={v300_precdf} (dav ccso pl=y v=1 r=46160)", left_ccso[p], msac.rng); }
+                if crate::env_is_set!("V320") && bx4 == 0 && by4 == 0 { crate::dlog!("V300 ccso p={p} ctx={ctx} v={} r={} pre_cdf={v300_precdf} (dav ccso pl=y v=1 r=46160)", left_ccso[p], msac.rng); }
                 // C3: store this 256px SB's CCSO enable flag for the filter pass.
                 if crate::av2_frame::RECON_ACTIVE.with(|a| a.get()) {
                     let on = left_ccso[p] != 0;
@@ -9628,7 +9684,7 @@ pub fn decode_b_luma(
     if intrabc {
         // intrabc leaves carry no palette — refresh the neighbour palette caches with none.
         crate::av2_palette::pal_splat(bx4, by4, bw4, bh4, 0, &[0u16; 8]);
-        if std::env::var("MIBC").is_ok() && bx4 == 64 && by4 == 0 { crate::dlog!("[MSEQ] pre-bvinfo rng={}", msac.rng); }
+        if crate::env_is_set!("MIBC") && bx4 == 64 && by4 == 0 { crate::dlog!("[MSEQ] pre-bvinfo rng={}", msac.rng); }
         // is_refmv → DRL bypass run → (precision when force_integer_mv==0) → mv residual
         // + per-component signs.
         let is_refmv = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.intrabc_mode);
@@ -9677,7 +9733,7 @@ pub fn decode_b_luma(
         });
         let pred = stack.get(drl as usize).map(|c| c.mv[0]).unwrap_or(crate::av2_refmvs::Mv { y: 0, x: 0 });
         let (mut bvy, mut bvx) = (pred.y, pred.x);
-        if std::env::var("V64").is_ok() && bx4 == 64 && by4 == 24 { crate::dlog!("V64 is_refmv={is_refmv} drl={drl} is_qpel={is_qpel} mvdelta=({},{}) pred=({},{}) BV=({bvy},{bvx}) r={} (dav mode1 drl1 prec1 r=58912)", mv.0, mv.1, pred.y, pred.x, msac.rng); }
+        if crate::env_is_set!("V64") && bx4 == 64 && by4 == 24 { crate::dlog!("V64 is_refmv={is_refmv} drl={drl} is_qpel={is_qpel} mvdelta=({},{}) pred=({},{}) BV=({bvy},{bvx}) r={} (dav mode1 drl1 prec1 r=58912)", mv.0, mv.1, pred.y, pred.x, msac.rng); }
         // (0,0) predictor fallback (dav decode.c:995-1004): force a default direction.
         // The "first SB row" test is TILE-relative (t->by - sb_step < tiling.row_start).
         if bvy == 0 && bvx == 0 {
@@ -9685,7 +9741,7 @@ pub fn decode_b_luma(
             let row_start = TILE_B.with(|t| t.get().2) as i32;
             if (by4 as i32 - sb_step4() as i32) < row_start { bvx = -(8 * (sbsz + 256)); } else { bvy = -(8 * sbsz); }
         }
-        if std::env::var("IBCDBG").is_ok() {
+        if crate::env_is_set!("IBCDBG") {
             crate::dlog!("[IBC] ({bx4},{by4}) is_refmv={is_refmv} drl={drl} qpel={is_qpel} mvd=({},{}) pred=({},{}) r={}", mv.0, mv.1, pred.y, pred.x, msac.rng);
         }
         if !is_refmv {
@@ -9697,7 +9753,7 @@ pub fn decode_b_luma(
             bvy += mv.0;
         }
         let ibc_bv = (bvy, bvx);
-        if std::env::var("MIBC").is_ok() && bx4 == 64 && by4 == 0 { crate::dlog!("[MSEQ] post-bvinfo bv=({bvy},{bvx}) rng={}", msac.rng); }
+        if crate::env_is_set!("MIBC") && bx4 == 64 && by4 == 0 { crate::dlog!("[MSEQ] post-bvinfo bv=({bvy},{bvx}) rng={}", msac.rng); }
         // morph_pred (avm read_intrabc_info tail, decodemv.c:1479): SCC INTRA frames code a
         // per-BV morph flag (av2_allow_intrabc_morph_pred reconintra.h:81 = seq intra_bawp
         // [== seq bawp, =1 in all mints] && frame allow_scc && frame_is_intra_only). ctx =
@@ -9707,7 +9763,7 @@ pub fn decode_b_luma(
         if !inter_frame && tool_cfg.allow_scc && SEQ_TOOLS.with(|c| c.get().bawp) {
             let mctx = nb_sum(&slots, &a.morph, &l.morph) as usize;
             morph = rav1d_msac_decode_bool_adapt(msac, &mut cdf.m.morph_pred[mctx]);
-            if std::env::var("MIBC").is_ok() { crate::dlog!("[MIBC] mi=({bx4},{by4}) morph ctx={mctx} v={} rng={}", morph as u8, msac.rng); }
+            if crate::env_is_set!("MIBC") { crate::dlog!("[MIBC] mi=({bx4},{by4}) morph ctx={mctx} v={} rng={}", morph as u8, msac.rng); }
         }
 
         // Neighbour-context splats for an intrabc block (dav2d set_ctx, intrabc path):
@@ -9736,7 +9792,7 @@ pub fn decode_b_luma(
         // counts as inter). Coefs then decode PER TX UNIT; recon_intrabc loops the units.
         let tx_part = read_tx_part(msac, cdf, bd[0] as usize, bd[1] as usize, false, true, skip_txfm);
         let layout = tx_part_layout(bd[0] as usize, bd[1] as usize, tx_part);
-        let v64 = std::env::var("V64").is_ok() && bx4 == 64 && by4 == 24;
+        let v64 = crate::env_is_set!("V64") && bx4 == 64 && by4 == 24;
         let (iw4g, ih4g) = crate::av2_frame::FRAME.with(|fr| { let f = fr.borrow(); (f.iw4, f.ih4) });
         let mut units: Vec<TxUnitCf> = Vec::new();
         let mut last = (true, -1i32, Vec::new(), DCT_DCT, 0u8);
@@ -9753,7 +9809,7 @@ pub fn decode_b_luma(
                 let tx2dszctx = clw + clh;
                 let all_zero = skip_txfm || {
                     let sctx = crate::av2_coef::skip_ctx_luma(&a.lcoef[ubx4..], &l.lcoef[uby4..], slw, slh, &bd) as usize;
-                    if std::env::var("MTXB").is_ok() { crate::dlog!("[MTXB] mi=({ubx4},{uby4}) pl=0i txs={t_dim_ctx} skipctx={sctx} rng={}", msac.rng); }
+                    if crate::env_is_set!("MTXB") { crate::dlog!("[MTXB] mi=({ubx4},{uby4}) pl=0i txs={t_dim_ctx} skipctx={sctx} rng={}", msac.rng); }
                     let az = rav1d_msac_decode_bool_adapt(msac, &mut cdf.coef.skip[1][t_dim_ctx][sctx]);
                     if v64 { crate::dlog!("V64 all_zero={} sctx={sctx} tctx={t_dim_ctx} r={}", az as u8, msac.rng); }
                     az
@@ -9772,7 +9828,9 @@ pub fn decode_b_luma(
                         let ey = e >> (2 + clw);
                         let ex = e & ((4 << clw) - 1);
                         let xy = ex + ey;
-                        let (tw, th) = (ubw4.min(8), ubh4.min(8));
+                        // avm get_lp2tx_ctx: the far-diagonal bound uses the TRANSFORM's size (64 capped to 32),
+                        // not the frame-clipped extent; a 4x32 unit cut to 4x24 by the bottom edge still bounds at 32.
+                        let (tw, th) = ((1usize << slw).min(8), (1usize << slh).min(8));
                         let txtp_ctx = if xy < 2 {
                             1
                         } else if xy > 4 * (tw as i32 + th as i32) - 4 {
@@ -9854,7 +9912,7 @@ pub fn decode_b_luma(
         // txtp_map at the block's TOP-LEFT cell, i.e. the FIRST unit's txtp.
         let out_txtp = if units.is_empty() { luma_txtp } else { first_txtp };
         if !skip_txfm {
-            if std::env::var("SBTRACE").is_ok() { crate::dlog!("LEAFDIF ({bx4},{by4}) bs={bs} dif={:x} rng={}", msac.dif, msac.rng); }
+            if crate::env_is_set!("SBTRACE") { crate::dlog!("LEAFDIF ({bx4},{by4}) bs={bs} dif={:x} rng={}", msac.dif, msac.rng); }
         }
         return LeafInfo {
             intrabc: true,
@@ -9877,15 +9935,15 @@ pub fn decode_b_luma(
 
     // intra_y_mode — set, then idx (two-level for set 0), then derive midx.
     if bx4 == 8 && by4 == 8 { crate::dlog!("Y88L pre-y_set rng={} dif={:x} intrabc={} skip={}", msac.rng, msac.dif, intrabc as u8, skip_txfm as u8); }
-    let v300 = std::env::var("V320").is_ok() && bx4 == 0 && by4 == 0;
+    let v300 = crate::env_is_set!("V320") && bx4 == 0 && by4 == 0;
     if v300 { crate::dlog!("V300 pre-y_set r={} (dav: ccso done r=46160)", msac.rng); }
     if v300 { crate::dlog!("V300 y_set_cdf={:?} dif={:x} cnt={}", cdf.m.intra_y_set, msac.dif, msac.cnt); }
-    if std::env::var("MYSET").is_ok() { crate::dlog!("[MYSET] mi=({bx4},{by4}) cell={:?} r={}", cdf.m.intra_y_set, msac.rng); }
+    if crate::env_is_set!("MYSET") { crate::dlog!("[MYSET] mi=({bx4},{by4}) cell={:?} r={}", cdf.m.intra_y_set, msac.rng); }
     let y_set = rav1d_msac_decode_symbol_adapt4(msac, &mut cdf.m.intra_y_set, 3);
     if v300 { crate::dlog!("V300 y_set={y_set} r={}", msac.rng); }
     let y_mode_idx = if y_set == 0 {
         let mctx = mode_ctx(&a.midx, &l.midx, bx4, by4, bw4, bh4, w4, h4);
-        if std::env::var("MYCTX").is_ok() { crate::dlog!("[MYCTX] mi=({bx4},{by4}) set={y_set} mctx={mctx} rng={}", msac.rng); }
+        if crate::env_is_set!("MYCTX") { crate::dlog!("[MYCTX] mi=({bx4},{by4}) set={y_set} mctx={mctx} rng={}", msac.rng); }
         if bx4 == 8 && by4 == 8 { crate::dlog!("Y88L y_set={y_set} mctx={mctx} rng={} dif={:x}", msac.rng, msac.dif); }
         let mut idx = rav1d_msac_decode_symbol_adapt8(msac, &mut cdf.m.intra_y_idx0[mctx], 7) as i32;
         if idx == 7 {
@@ -9966,7 +10024,7 @@ pub fn decode_b_luma(
     if dbg {
         crate::dlog!("[4x8dbg] mrl={mrl_index} multi={multi_mrl} rng={} (oracle mrl 48512, multi 60928)", msac.rng);
     }
-    if std::env::var("MKEYL").is_ok() { crate::dlog!("[MKEYL2] mi=({bx4},{by4}) yidx={y_mode_idx} midx={midx} fsc={} mrl={mrl_index} rng={}", fsc as u8, msac.rng); }
+    if crate::env_is_set!("MKEYL") { crate::dlog!("[MKEYL2] mi=({bx4},{by4}) yidx={y_mode_idx} midx={midx} fsc={} mrl={mrl_index} rng={}", fsc as u8, msac.rng); }
 
     // all_zero/skip — fsc forces sctx=9; else get_skip_ctx (0 when TX covers block).
     // TX-size context (dav2d `t_dim->ctx`): average of the min-square and max-square TX
@@ -10005,7 +10063,7 @@ pub fn decode_b_luma(
         let n = rav1d_msac_decode_symbol_adapt8(msac, &mut cdf.m.pal_sz, 6) as usize + 2;
         let bd_bits = if bdmax_g() > 255 { 10u8 } else { 8 };
         let colors = crate::av2_palette::read_palette_colors_y(msac, bd_bits, n, bx4, by4, have_left, have_top);
-        if std::env::var("MPAL").is_ok() { crate::dlog!("[MPAL] mi=({bx4},{by4}) n={n} colors={:?} rng={} cnt={}", &colors[..n], msac.rng, msac.cnt); }
+        if crate::env_is_set!("MPAL") { crate::dlog!("[MPAL] mi=({bx4},{by4}) n={n} colors={:?} rng={} cnt={}", &colors[..n], msac.rng, msac.cnt); }
         palette = Some(crate::av2_palette::PaletteBlock { n, colors, map: Vec::new(), w: w4 * 4, h: h4 * 4 });
     }
     if !defer_coefs {
@@ -10026,7 +10084,7 @@ pub fn decode_b_luma(
         p.map = crate::av2_palette::decode_color_map(
             msac, &mut cdf.m.pal_idx_identity, &mut cdf.m.pal_idx, p.n, p.w, p.h, bh4 * 4, bw4 * 4,
         ).expect("palette color map");
-        if std::env::var("MPAL").is_ok() { crate::dlog!("[MPAL] mi=({bx4},{by4}) map done rng={} cnt={}", msac.rng, msac.cnt); }
+        if crate::env_is_set!("MPAL") { crate::dlog!("[MPAL] mi=({bx4},{by4}) map done rng={} cnt={}", msac.rng, msac.cnt); }
     }
 
     // ===== TX PARTITION + per-unit coef/recon (dav decode.c:2328 read_tx_part + per-TX
@@ -10034,7 +10092,7 @@ pub fn decode_b_luma(
     // the old single-TX path (byte-identical by construction). =====
     let tx_part = read_tx_part(msac, cdf, bd[0] as usize, bd[1] as usize, fsc, false, false);
     let layout = tx_part_layout(bd[0] as usize, bd[1] as usize, tx_part);
-    let mt00 = std::env::var("MTRACE").is_ok() && bx4 == 0 && by4 == 0;
+    let mt00 = crate::env_is_set!("MTRACE") && bx4 == 0 && by4 == 0;
     let (iw4g, ih4g) = crate::av2_frame::FRAME.with(|fr| { let f = fr.borrow(); (f.iw4, f.ih4) });
     let mut last_ret = (false, -1i32, Vec::new(), DCT_DCT, 0x40u8);
     {
@@ -10104,8 +10162,8 @@ pub fn decode_b_luma(
             last_ret = (all_zero, eob, cf, blk_txtp, cf_ctx);
         }
     }
-    if std::env::var("SBTRACE").is_ok() { crate::dlog!("LEAFDIF ({bx4},{by4}) bs={bs} dif={:x} rng={}", msac.dif, msac.rng); }
-    if std::env::var("BRDBG").is_ok() && bx4 >= 94 && by4 >= 48 {
+    if crate::env_is_set!("SBTRACE") { crate::dlog!("LEAFDIF ({bx4},{by4}) bs={bs} dif={:x} rng={}", msac.dif, msac.rng); }
+    if crate::env_is_set!("BRDBG") && bx4 >= 94 && by4 >= 48 {
         crate::dlog!("DBLUMA-RECON ({bx4},{by4}) bw4={bw4} bh4={bh4} midx={midx} ymode={y_mode_idx} intrabc={intrabc}");
     }
     let (all_zero, eob, cf, blk_txtp, _cfc) = last_ret;

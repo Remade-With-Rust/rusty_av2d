@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.2.13...rusty_av2d-v0.3.0) - 2026-11-08
+
+Real `avmenc` streams now decode correctly, and decoding is 2.7–3.8× faster.
+
+### Fixed
+
+- Wrong output on real `avmenc` streams ([#14](https://github.com/Remade-With-Rust/rusty_av2d/issues/14)): frames now decode on the 8px-aligned coded area and are cropped only at output; IST, CCTX, luma per-unit Wiener and inter-intra are applied; compound warp-causal prediction is implemented; TIP-as-output frames are deblocked; plus delta-Q, BAWP, GDF tile-row, superblock-row context and CDF fixes. The nine streams from the issue match `avmdec` byte for byte.
+- 10-bit: the difference-weighted compound mask used an 8-bit shift.
+- 4:2:2: the inter transform-type context used the frame-clipped unit size.
+- 4:4:4: CfL context, MHCCP corner counts and BAWP edge templates.
+- Pending frames are flushed at end of stream, and the CLI exits non-zero on a decode error.
+
+### Changed
+
+- Streams using tools that aren't implemented now return an error instead of wrong pixels: segmentation, non-identity global motion, loop filtering disabled across tiles with several tiles, `tip_explicit_qp`, segmented quantization matrices, and monochrome (which used to panic).
+- The corpus gains 12 clips with dimensions that aren't multiples of 8 (69 in all).
+
+### Performance
+
+- 2.7–3.8× faster than 0.2.13 on the 432×240 corpus clips (2.1–2.3× fewer instructions), output unchanged. See the README's Performance section for the method.
+- The AVX2/NEON motion-compensation kernels now handle every fixed-filter 8-tap sample (12.8% before) and run per block; their safe entry points check bounds in release builds.
+- Reference planes are shared instead of copied; loop restoration reads prefetched windows; GDF reads each sample's class once per row; scratch buffers are reused instead of zeroed per call; diagnostic switches are cached per call site; the corrupt-stream work budget is a thread-local decrement.
+
 ## [0.2.13](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.2.12...rusty_av2d-v0.2.13) - 2026-10-17
 
 ### Other

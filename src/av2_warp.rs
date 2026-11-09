@@ -147,7 +147,7 @@ fn warp_affine_inner(
             let dy = (mvy >> 16) as i32 - 4;
             let my = (((mvy as i32) & 0xffff) - abcd[2] as i32 * 4 - abcd[3] as i32 * 4) & !0x3f;
             warp8x8(rf, dst, dstw, x, y, dx, dy, abcd, mx, my, bdmax, prep);
-            if std::env::var("MWARP2").is_ok() && ss_hor == 0 && bx4 == 120 / 4 && by4 == 80 / 4 {
+            if crate::env_is_set!("MWARP2") && ss_hor == 0 && bx4 == 120 / 4 && by4 == 80 / 4 {
                 crate::dlog!("[MWARP2] sub=({x},{y}) dxy=({dx},{dy}) mxy=({mx},{my}) abcd={abcd:?} out0={} out57={}",
                     dst[y * dstw + x], dst[(y + 7) * dstw + x + 5]);
             }
@@ -234,7 +234,6 @@ fn ext_warp_inner(
                         for j in 0..4usize {
                             if !crate::av2_recon::work_tick("av2_warp:198") { break; }
                             for i in 0..4usize {
-                                if !crate::av2_recon::work_tick("av2_warp:199") { break; }
                                 let s: i32 = (0..8).map(|k| fv[k] as i32 * mid[j + k][i]).sum();
                                 dst[(oy + j) * dstw + ox + i] = if prep { (s + 64) >> 7 } else { ((s + 1024) >> 11).clamp(0, bdmax) }; // sh = bits + interm = 11
                             }
@@ -255,7 +254,6 @@ fn ext_warp_inner(
                         for j in 0..4usize {
                             if !crate::av2_recon::work_tick("av2_warp:215") { break; }
                             for i in 0..4usize {
-                                if !crate::av2_recon::work_tick("av2_warp:216") { break; }
                                 let s: i32 = (0..8).map(|k| fv[k] as i32 * get(dx + i as i32, dy + j as i32 + k as i32 - 3)).sum();
                                 dst[(oy + j) * dstw + ox + i] = if prep { (s + 4) >> 3 } else { ((s + 64) >> 7).clamp(0, bdmax) }; // sh = bits = 7
                             }
@@ -264,7 +262,6 @@ fn ext_warp_inner(
                         for j in 0..4usize {
                             if !crate::av2_recon::work_tick("av2_warp:222") { break; }
                             for i in 0..4usize {
-                                if !crate::av2_recon::work_tick("av2_warp:223") { break; }
                                 dst[(oy + j) * dstw + ox + i] = if prep { get(dx + i as i32, dy + j as i32) << 4 } else { get(dx + i as i32, dy + j as i32) };
                             }
                         }

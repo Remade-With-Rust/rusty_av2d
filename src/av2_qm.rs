@@ -44,7 +44,7 @@ thread_local! {
 }
 
 pub fn set_frame_qm(enabled: bool, qy: u8, qu: u8, qv: u8) {
-    if std::env::var("MQM").is_ok() {
+    if crate::env_is_set!("MQM") {
         crate::dlog!("[MQM] enabled={enabled} y={qy} u={qu} v={qv}");
     }
     QM_FRAME.with(|c| c.set((enabled, qy, qu, qv)));

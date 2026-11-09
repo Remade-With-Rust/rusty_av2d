@@ -634,7 +634,7 @@ pub fn warp_extend(
             x_off = 0;
             y_off = 0;
         }
-        if std::env::var("WEDBG").is_ok() && bx4 == 22 && by4 == 54 {
+        if crate::env_is_set!("WEDBG") && bx4 == 22 && by4 == 54 {
             crate::dlog!("WEDBG drl_off={drl_off:?} r.ref={:?} r.mf={} -> off=({x_off},{y_off})", r.ref_, r.mf);
         }
     }
@@ -713,7 +713,7 @@ pub fn warp_extend(
         m[4] = ((m4 + 0x20 - (m4 < 0) as i32) & !0x3f).clamp(-0x7fc0, 0x7fc0);
     }
     set_affine_mv2d(bw4, bh4, fmv, &mut m, bx4, by4);
-    if std::env::var("WEDBG").is_ok() && bx4 == 22 && by4 == 54 {
+    if crate::env_is_set!("WEDBG") && bx4 == 22 && by4 == 54 {
         crate::dlog!("WEDBG final off=({x_off},{y_off}) fmv=({},{}) m={m:x?}", fmv.y, fmv.x);
     }
     (m[2] > 0).then_some(m) // WM_TYPE_INVALID iff mat[2] <= 0 (dav get_shear_params early return)
@@ -1227,7 +1227,7 @@ pub fn reset_stream_state() {
 pub fn rp_save(refresh: u32, poc: u32, refpoc: [u32; 7], n_ref: u32) {
     RP_CUR.with(|c| {
         let (w8, h8, ref cells) = *c.borrow();
-        if std::env::var("RPDBG").map_or(false, |v| v == format!("{poc}")) {
+        if crate::env_get!("RPDBG").map_or(false, |v| v == format!("{poc}")) {
             for r in 0..3usize {
                 if !crate::av2_recon::work_tick("refmvs:1207") { break; }
                 let row: Vec<String> = (0..16.min(w8)).map(|x| {
@@ -1665,7 +1665,7 @@ pub fn tmvs_setup(
     }
     t.use_ref_frame_mvs = t.n_mfmvs > 0;
     // env MFMVDBG=<poc>: dump the mfmv source list in dav's [MFMV] probe format (setup A/B).
-    if std::env::var("MFMVDBG").map_or(false, |v| v == format!("{}", gpd(poc, 0))) {
+    if crate::env_get!("MFMVDBG").map_or(false, |v| v == format!("{}", gpd(poc, 0))) {
         crate::dlog!("[MFMV] poc={} n={}", gpd(poc, 0), t.n_mfmvs);
         for n in 0..t.n_mfmvs {
             if !crate::av2_recon::work_tick("refmvs:1635") { break; }
@@ -1742,7 +1742,6 @@ pub fn load_tmvs(row_start8: i32, row_end8: i32) {
                 for r in 0..2usize {
                     if !crate::av2_recon::work_tick("refmvs:1705") { break; }
                     for x in col_start8 as usize..(col_end8 as usize).min(stride as usize) {
-                        if !crate::av2_recon::work_tick("refmvs:1706") { break; }
                         // HARDENING: corrupt dims vs the projection window
                         let (di, si) = (r * stride as usize + x, base + ((sbsz8 as usize - 2 + r) * stride as usize) + x);
                         if di >= proj.len() || si >= proj.len() { continue; }
@@ -1763,7 +1762,6 @@ pub fn load_tmvs(row_start8: i32, row_end8: i32) {
                     for n in 0..7usize {
                         if !crate::av2_recon::work_tick("refmvs:1722") { break; }
                         for y in row_start8..row_end8 {
-                            if !crate::av2_recon::work_tick("refmvs:1723") { break; }
                             let py = ((y & (sbsz8 - 1)) * stride) as usize;
                             for x in col_start8 as usize..col_end8 as usize {
                                 if !crate::av2_recon::work_tick("refmvs:1725") { break; }
@@ -1808,7 +1806,6 @@ pub fn load_tmvs(row_start8: i32, row_end8: i32) {
                         for y in (row_start8..row_end8).step_by(step as usize) {
                             if !crate::av2_recon::work_tick("refmvs:1760") { break; }
                             for x in (col_start8i..col_end8i).step_by(step as usize) {
-                                if !crate::av2_recon::work_tick("refmvs:1761") { break; }
                                 // saved field cell (whole-frame layout)
                                 if y >= field.h8 as i32 || x >= field.w8 as i32 {
                                     continue;
@@ -2138,7 +2135,7 @@ pub fn load_tmvs(row_start8: i32, row_end8: i32) {
 /// Dump the just-projected window rows in avm's `[TPLALL] r c row,col,offset` coordinates so the
 /// whole-frame temporal grid can be diffed line-for-line against avmdec (env TPLALL).
 pub fn tpl_dump_window(row_start8: i32, row_end8: i32) {
-    if std::env::var("TPLALL").is_err() {
+    if !crate::env_is_set!("TPLALL") {
         return;
     }
     let t = TMVS.with(|c| c.borrow().clone());
@@ -2176,7 +2173,6 @@ pub fn tmvs_dump(row_start8: i32, row_end8: i32) {
             for y in row_start8..row_end8 {
                 if !crate::av2_recon::work_tick("refmvs:2084") { break; }
                 for x in 0..t.iw8 {
-                    if !crate::av2_recon::work_tick("refmvs:2085") { break; }
                     let pp = ((y & 7) as usize) * stride + x as usize;
                     let (m, r) = proj[2 * stride + pp];
                     crate::dlog!("[TPROJ] y={y} x={x} mv={},{} ref={r}", if m.y == INVALID_MV_I32 { -32768 } else { m.y }, m.x);
@@ -2700,7 +2696,6 @@ impl RefmvsGrid {
         for r in 0..bh4 {
             if !crate::av2_recon::work_tick("refmvs:2593") { break; }
             for c in 0..bw4 {
-                if !crate::av2_recon::work_tick("refmvs:2594") { break; }
                 let cell = &mut self.r[(by4 + r).min(crate::av2_recon::nb_len() - 1) * crate::av2_recon::nb_len() + (bx4 + c).min(crate::av2_recon::nb_len() - 1)];
                 *cell = RefmvsBlock { bs, bx4: bx4 as u16, by4: by4 as u16, ..RefmvsBlock::default() };
             }
@@ -2714,7 +2709,6 @@ impl RefmvsGrid {
         for r in 0..bh4 {
             if !crate::av2_recon::work_tick("refmvs:2605") { break; }
             for c in 0..bw4 {
-                if !crate::av2_recon::work_tick("refmvs:2606") { break; }
                 let cell = &mut self.r[(by4 + r).min(crate::av2_recon::nb_len() - 1) * crate::av2_recon::nb_len() + (bx4 + c).min(crate::av2_recon::nb_len() - 1)];
                 *cell = RefmvsBlock {
                     mv: [bv, Mv { y: -0x8000, x: -0x8000 }],
@@ -2743,7 +2737,6 @@ impl RefmvsGrid {
         for r in 0..bh4 {
             if !crate::av2_recon::work_tick("refmvs:2632") { break; }
             for c in 0..bw4 {
-                if !crate::av2_recon::work_tick("refmvs:2633") { break; }
                 let mv = if mf & 2 != 0 {
                     warp_cell_mv(&matrix, bx4 as i32, by4 as i32, (c as i32) & !1, (r as i32) & !1)
                 } else {

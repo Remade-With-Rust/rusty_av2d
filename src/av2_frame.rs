@@ -6,6 +6,7 @@
 //! (already bit-exact) entropy parse — it only consumes the parsed coefficients + mode.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 /// One reconstructed plane: `stride`-major `u16` samples (docs/plan.md Phase 1
 /// item 1 — samples were `i32`, which was 2–4× the memory traffic the data
@@ -31,7 +32,7 @@ impl Plane {
     #[track_caller]
     pub fn at(&self, x: usize, y: usize) -> i32 {
         let i = y * self.stride + x;
-        if std::env::var("ATDBG").is_ok() && i >= self.px.len() {
+        if i >= self.px.len() && crate::env_is_set!("ATDBG") {
             crate::dlog!("[ATDBG] Plane::at OOB x={x} y={y} w={} h={} len={} caller={}", self.w, self.h, self.px.len(), std::panic::Location::caller());
         }
         // HARDENING (root fix): every Plane::at caller in the recon/filter paths derives (x,y)
@@ -193,7 +194,6 @@ impl Frame {
         for r in sr..(sr + bh4).min(st) {
             if !crate::av2_recon::work_tick("frm:170") { break; }
             for c in sc..(sc + bw4).min(st) {
-                if !crate::av2_recon::work_tick("frm:171") { break; }
                 self.mi_coded_c[r * 32 + c] = true;
             }
         }
@@ -216,7 +216,6 @@ impl Frame {
         for r in sr..(sr + bh4).min(st) {
             if !crate::av2_recon::work_tick("frm:191") { break; }
             for c in sc..(sc + bw4).min(st) {
-                if !crate::av2_recon::work_tick("frm:192") { break; }
                 self.mi_coded[r * 32 + c] = true;
             }
         }
@@ -227,14 +226,12 @@ impl Frame {
         for r in sr..(sr + bh4).min(st) {
             if !crate::av2_recon::work_tick("frm:200") { break; }
             for c in sc..(sc + bw4).min(st) {
-                if !crate::av2_recon::work_tick("frm:201") { break; }
                 self.mi_coded[r * 32 + c] = true;
             }
         }
         for r in by4..(by4 + bh4).min(self.ih4) {
             if !crate::av2_recon::work_tick("frm:205") { break; }
             for c in bx4..(bx4 + bw4).min(self.iw4) {
-                if !crate::av2_recon::work_tick("frm:206") { break; }
                 self.joint[r * self.iw4 + c] = joint;
             }
         }
@@ -252,7 +249,6 @@ impl Frame {
         for r in by4..(by4 + bh4).min(ih4) {
             if !crate::av2_recon::work_tick("frm:221") { break; }
             for c in bx4..(bx4 + bw4).min(iw4) {
-                if !crate::av2_recon::work_tick("frm:222") { break; }
                 let cell = r * iw4 + c;
                 self.db_lw[cell] = lw;
                 self.db_lh[cell] = lh;
@@ -271,7 +267,6 @@ impl Frame {
         for r in by4..(by4 + bh4).min(ih4) {
             if !crate::av2_recon::work_tick("frm:238") { break; }
             for c in bx4..(bx4 + bw4).min(iw4) {
-                if !crate::av2_recon::work_tick("frm:239") { break; }
                 let cell = r * iw4 + c;
                 self.db_lw[cell] = lw;
                 self.db_lh[cell] = lh;
@@ -296,7 +291,6 @@ impl Frame {
         for r in by4..(by4 + bh4).min(ih4) {
             if !crate::av2_recon::work_tick("frm:261") { break; }
             for c in bx4..(bx4 + bw4).min(iw4) {
-                if !crate::av2_recon::work_tick("frm:262") { break; }
                 let cell = r * iw4 + c;
                 self.db_lw[cell] = self.db_lw[cell].min(sl);
                 self.db_lh[cell] = self.db_lh[cell].min(sl);
@@ -351,7 +345,6 @@ impl Frame {
         for r in cby4..(cby4 + cbh4).min(ih4) {
             if !crate::av2_recon::work_tick("frm:312") { break; }
             for c in cbx4..(cbx4 + cbw4).min(iw4) {
-                if !crate::av2_recon::work_tick("frm:313") { break; }
                 let cell = r * iw4 + c;
                 self.cdb_lw[cell] = self.cdb_lw[cell].min(lw_cap);
                 self.cdb_lh[cell] = self.cdb_lh[cell].min(lh_cap);
@@ -422,7 +415,6 @@ impl Frame {
         for dy in 0..n64 {
             if !crate::av2_recon::work_tick("frm:379") { break; }
             for dx in 0..n64 {
-                if !crate::av2_recon::work_tick("frm:380") { break; }
                 let (cx, cy) = ((bx4 >> 4) + dx, (by4 >> 4) + dy);
                 if cx < self.cdef_sbw && cy < rows {
                     self.sb_qidx[cy * self.cdef_sbw + cx] = q;
@@ -452,7 +444,6 @@ impl Frame {
         for r in by4..(by4 + bh4).min(self.ih4) {
             if !crate::av2_recon::work_tick("frm:407") { break; }
             for c in bx4..(bx4 + bw4).min(self.iw4) {
-                if !crate::av2_recon::work_tick("frm:408") { break; }
                 self.lr_noskip[r * self.iw4 + c] = true;
             }
         }
@@ -513,7 +504,7 @@ impl Frame {
         if self.cdb_lw.is_empty() {
             return;
         }
-        if std::env::var("DBLK444").is_ok()
+        if crate::env_is_set!("DBLK444")
             && (cbx4 * 4 <= 208 && (cbx4 + cbw4) * 4 >= 192 && cby4 * 4 <= 124 && (cby4 + cbh4) * 4 >= 112)
         {
             crate::dlog!("[MMARK] c=({},{}) w={} h={}", cbx4 * 4, cby4 * 4, cbw4 * 4, cbh4 * 4);
@@ -524,7 +515,6 @@ impl Frame {
         for r in cby4..(cby4 + cbh4).min(cih4) {
             if !crate::av2_recon::work_tick("frm:476") { break; }
             for c in cbx4..(cbx4 + cbw4).min(ciw4) {
-                if !crate::av2_recon::work_tick("frm:477") { break; }
                 let cell = r * ciw4 + c;
                 self.cdb_lw[cell] = lw;
                 self.cdb_lh[cell] = lh;
@@ -573,14 +563,16 @@ thread_local! {
 
     /// Stage D: frame-1 reconstructed+FILTERED output planes [Y, U, V] — the inter-prediction
     /// reference (dav2d `f->refp[0]`). Loaded from the normal (filtered) dav2d frame-1 output.
-    pub static REF_FRAME1: RefCell<[Option<Plane>; 3]> = const { RefCell::new([None, None, None]) };
+    /// Shared with REF_PICS: reference planes are never written after they are stored, so
+    /// switching the loaded reference is three refcount bumps, not three plane copies.
+    pub static REF_FRAME1: RefCell<[Option<Rc<Plane>>; 3]> = const { RefCell::new([None, None, None]) };
     /// Mine's OWN just-decoded + fully-filtered frame-1 planes, stashed to serve as the inter
     /// frame's reference — a true standalone decode with no external reference file.
-    pub static STASH_FRAME1: RefCell<[Option<Plane>; 3]> = const { RefCell::new([None, None, None]) };
+    pub static STASH_FRAME1: RefCell<[Option<Rc<Plane>>; 3]> = const { RefCell::new([None, None, None]) };
     /// The 8-slot reference-PICTURE buffer (dav2d `c->refs[i].p`): each decoded+filtered frame's
     /// [Y,U,V] planes, written into every slot selected by refresh_frame_flags. Parallel to the
     /// REF_SLOTS metadata. The compound/multi-ref MC indexes this by `refidx[ref]`.
-    pub static REF_PICS: RefCell<[Option<[Plane; 3]>; 8]> =
+    pub static REF_PICS: RefCell<[Option<[Rc<Plane>; 3]>; 8]> =
         const { RefCell::new([None, None, None, None, None, None, None, None]) };
     /// Stage D inter-recon scoreboard: (#luma blocks bit-exact vs REF, #luma blocks total).
     pub static INTER_SCORE: std::cell::Cell<(u32, u32)> = const { std::cell::Cell::new((0, 0)) };
@@ -704,7 +696,7 @@ pub fn load_ref_frame1(path: &str, w: usize, h: usize) {
                 pu.px[i] = bytes[luma_sz + i] as u16;
                 pv.px[i] = bytes[luma_sz + csz + i] as u16;
             }
-            REF_FRAME1.with(|r| *r.borrow_mut() = [Some(py), Some(pu), Some(pv)]);
+            REF_FRAME1.with(|r| *r.borrow_mut() = [Some(Rc::new(py)), Some(Rc::new(pu)), Some(Rc::new(pv))]);
             INTER_SCORE.with(|s| s.set((0, 0)));
         }
     }
@@ -725,8 +717,8 @@ pub fn reset_stream_state() {
 pub fn stash_decoded_frame1() {
     FRAME.with(|fr| {
         let f = fr.borrow();
-        let planes: [Option<Plane>; 3] =
-            std::array::from_fn(|i| if f.pl[i].w == 0 { None } else { Some(f.pl[i].clone()) });
+        let planes: [Option<Rc<Plane>>; 3] =
+            std::array::from_fn(|i| if f.pl[i].w == 0 { None } else { Some(Rc::new(f.pl[i].clone())) });
         STASH_FRAME1.with(|s| *s.borrow_mut() = planes);
     });
     // MREFDUMP=<prefix>: write each decoded frame's final recon (decode order) as
@@ -746,7 +738,6 @@ pub fn stash_decoded_frame1() {
                     for y in 0..p.h {
                         if !crate::av2_recon::work_tick("frm:683") { break; }
                         for x in 0..p.w {
-                            if !crate::av2_recon::work_tick("frm:684") { break; }
                             let v = p.px[y * p.stride + x];
                             if hbd {
                                 let _ = fp.write_all(&(v as u16).to_le_bytes());
@@ -769,7 +760,8 @@ pub fn update_ref_pics(refresh: u32) {
         if f.pl[0].w == 0 {
             return;
         }
-        let planes: [Plane; 3] = std::array::from_fn(|i| f.pl[i].clone());
+        // One copy of the frame, shared by every refreshed slot.
+        let planes: [Rc<Plane>; 3] = std::array::from_fn(|i| Rc::new(f.pl[i].clone()));
         REF_PICS.with(|r| {
             let mut slots = r.borrow_mut();
             for i in 0..8 {
@@ -1023,7 +1015,7 @@ thread_local! {
 /// (REF_F2RECON) and print the first mismatch — in DECODE order — so the true cascade ROOT
 /// (earliest wrong block, any type) is visible. `tag` labels the block type.
 pub fn dbg_block_miss(bx4: usize, by4: usize, bw4: usize, bh4: usize, tag: &str) {
-    if std::env::var("RECONDBG").is_err() {
+    if !crate::env_is_set!("RECONDBG") {
         return;
     }
     REF_F2RECON.with(|r| {
@@ -1035,7 +1027,6 @@ pub fn dbg_block_miss(bx4: usize, by4: usize, bw4: usize, bh4: usize, tag: &str)
                 for yy in 0..h {
                     if !crate::av2_recon::work_tick("frm:952") { break; }
                     for xx in 0..w {
-                        if !crate::av2_recon::work_tick("frm:953") { break; }
                         let (px, py) = (bx4 * 4 + xx, by4 * 4 + yy);
                         if px < rp.w && py < rp.h {
                             let m = f.pl[0].px[py * f.pl[0].stride + px] as i32;
@@ -1055,7 +1046,7 @@ pub fn dbg_block_miss(bx4: usize, by4: usize, bw4: usize, bh4: usize, tag: &str)
 /// `px0,py0`, size `w×h`) to dav's frame-2 chroma recon (`REF_F2RECONC`) and print the FIRST
 /// mismatching pixel — the causal root, since it fires in decode order before any cascade.
 pub fn dbg_block_miss_c(px0: usize, py0: usize, w: usize, h: usize, tag: &str) {
-    if std::env::var("CRECONDBG").is_err() {
+    if !crate::env_is_set!("CRECONDBG") {
         return;
     }
     REF_F2RECONC.with(|r| {
@@ -1068,7 +1059,6 @@ pub fn dbg_block_miss_c(px0: usize, py0: usize, w: usize, h: usize, tag: &str) {
                 for yy in 0..h {
                     if !crate::av2_recon::work_tick("frm:983") { break; }
                     for xx in 0..w {
-                        if !crate::av2_recon::work_tick("frm:984") { break; }
                         let (px, py) = (px0 + xx, py0 + yy);
                         if px < rp.w && py < rp.h {
                             let m = f.pl[pl + 1].px[py * f.pl[pl + 1].stride + px] as i32;
@@ -1096,7 +1086,6 @@ pub fn mark_btype(bx4: usize, by4: usize, bw4: usize, bh4: usize, t: u8) {
         for y in by4 * 4..((by4 + bh4) * 4).min(fh) {
             if !crate::av2_recon::work_tick("frm:1031") { break; }
             for x in bx4 * 4..((bx4 + bw4) * 4).min(fw) {
-                if !crate::av2_recon::work_tick("frm:1032") { break; }
                 m[y * fw + x] = t;
             }
         }
@@ -1271,7 +1260,6 @@ pub fn dump_frame2_luma_wmap(path: &str) {
     for y4 in 0..ih4.min(60) {
         if !crate::av2_recon::work_tick("frm:1203") { break; }
         for x4 in 1..iw4.min(108) {
-            if !crate::av2_recon::work_tick("frm:1204") { break; }
             let cell = y4 * iw4 + x4;
             if db_left[cell] {
                 let level = db_lw[cell].min(db_lw[cell - 1]) as usize;
@@ -1283,7 +1271,6 @@ pub fn dump_frame2_luma_wmap(path: &str) {
     for y4 in 1..ih4.min(60) {
         if !crate::av2_recon::work_tick("frm:1213") { break; }
         for x4 in 0..iw4.min(108) {
-            if !crate::av2_recon::work_tick("frm:1214") { break; }
             let cell = y4 * iw4 + x4;
             if db_top[cell] {
                 let level = db_lh[cell].min(db_lh[cell - iw4]) as usize;
@@ -1377,7 +1364,6 @@ pub fn run_cdef_verify(deblk_path: &str, cdef_path: &str) {
     for by4 in (0..ih4).step_by(2) {
         if !crate::av2_recon::work_tick("frm:1304") { break; }
         for bx4 in (0..iw4).step_by(2) {
-            if !crate::av2_recon::work_tick("frm:1305") { break; }
             let sb = (by4 >> 4) * cdef_sbw + (bx4 >> 4);
             let ci = cdef_idx[sb];
             if ci < 0 {
@@ -1495,7 +1481,6 @@ pub fn run_ccso_verify(deblk_path: &str, cdef_path: &str, ccso_path: &str) {
             for py in 0..ph {
                 if !crate::av2_recon::work_tick("frm:1420") { break; }
                 for px in 0..pw {
-                    if !crate::av2_recon::work_tick("frm:1421") { break; }
                     let lx = (px << ss_hor) as i32;
                     let ly = (py << ss_ver) as i32;
                     let block = ((ly >> ccso_sh) as usize) * ccso_col256 + ((lx >> ccso_sh) as usize);
@@ -1696,7 +1681,6 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
                 for y in 0..p.h {
                     if !crate::av2_recon::work_tick("frm:1533") { break; }
                     for x in 0..p.w {
-                        if !crate::av2_recon::work_tick("frm:1534") { break; }
                         out.push(p.px[y * p.stride + x].clamp(0, 255) as u8);
                     }
                 }
@@ -1723,7 +1707,6 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
                 for y in 0..p.h {
                     if !crate::av2_recon::work_tick("frm:1555") { break; }
                     for x in 0..p.w {
-                        if !crate::av2_recon::work_tick("frm:1556") { break; }
                         let v = p.px[y * p.stride + x];
                         if hbd {
                             out.extend_from_slice(&(v as u16).to_le_bytes());
@@ -1736,7 +1719,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         });
         let _ = std::fs::write(format!("{prefix}_{n}.yuv"), &out);
     }
-    if std::env::var("MDBGRID").is_ok() {
+    if crate::env_is_set!("MDBGRID") {
         let dc = DEBLOCK_CFG.with(|c| c.get());
         crate::dlog!("[MDBCFG] y0={} y1={} u={} v={} sub_pu={} dqy0={} dqy1={} dqu={} dqv={}",
             dc.level_y0 as u8, dc.level_y1 as u8, dc.level_u as u8, dc.level_v as u8,
@@ -1782,7 +1765,14 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
         let mut out: Vec<u8> = Vec::with_capacity(w * h * 3 / 2);
         for (p, stride, pw, ph) in [(&pl0, w, vw, vh), (&pl1, cw, vcw, vch), (&pl2, cw, vcw, vch)] {
-            out.extend(crop_plane(p, stride, pw, ph).iter().map(|v| (*v).clamp(0, 255) as u8));
+            // 16-bit little-endian at high bit depth, matching avmdec's dumps.
+            for v in crop_plane(p, stride, pw, ph) {
+                if bdmax > 255 {
+                    out.extend_from_slice(&(v.clamp(0, bdmax) as u16).to_le_bytes());
+                } else {
+                    out.push(v.clamp(0, 255) as u8);
+                }
+            }
         }
         let _ = std::fs::write(format!("{path}_{n}.yuv"), &out);
     }
@@ -1791,11 +1781,11 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         let mut f = std::fs::File::create(path).unwrap();
         for v in pl0.iter() { f.write_all(&(*v as u16).to_le_bytes()).unwrap(); }
     }
-    if std::env::var("MDBW").is_ok() {
+    if crate::env_is_set!("MDBW") {
         crate::av2_deblock::QMAP.with(|w| *w.borrow_mut() = vec![-1i16; 6 * 6480]);
     }
     let mut dcfg = DEBLOCK_CFG.with(|c| c.get());
-    if std::env::var("NODEBLOCK").is_ok() {
+    if crate::env_is_set!("NODEBLOCK") {
         dcfg.level_y0 = false;
         dcfg.level_y1 = false;
         dcfg.level_u = false;
@@ -1847,7 +1837,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             (deblock_quant_thr(q + 8 * dcfg.dq_y0, hbd), deblock_side_thr(q + 8 * dcfg.dq_y0, hbd),
              deblock_quant_thr(q + 8 * dcfg.dq_y1, hbd), deblock_side_thr(q + 8 * dcfg.dq_y1, hbd))
         }).collect();
-        if std::env::var("DQGRID").is_ok() {
+        if crate::env_is_set!("DQGRID") {
             crate::dlog!("[DQGRID] w={sbq_w} len={} grid={:?}", sbq_grid.len(), &sbq_grid[..sbq_grid.len().min(28)]);
             crate::dlog!("[DQGRID] ythr[0..8]={:?}", &ythr[..ythr.len().min(8)]);
         }
@@ -1863,7 +1853,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             (a, b, a, b)
         }).collect();
         let sbt = if uthr.is_empty() { None } else { Some((uthr.as_slice(), sbq_w, ss_h_c, ss_v_c)) };
-        crate::av2_deblock::DBG_TAG.with(|c| c.set(std::env::var("DBLK444").is_ok()));
+        crate::av2_deblock::DBG_TAG.with(|c| c.set(crate::env_is_set!("DBLK444")));
         deblock_plane(&mut pl1, ciw4, cih4, cw, &cdb_lw, &cdb_lh, &cdb_left, &cdb_top, q, s, q, s, sbt, &cdb_spv, &cdb_sph, bdmax, &MAX_WIDTH_UV_TBL, 16 >> SS.with(|c| c.get()).1, 2, true, true, &tile_v_c);
         crate::av2_deblock::DBG_TAG.with(|c| c.set(false));
     }
@@ -1886,7 +1876,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     }
     // Debug: replace mine's post-deblock with dav's (same-run) so CDEF/CCSO/GDF are tested on
     // perfect input, removing any deblock cascade. Isolates cdef/ccso/gdf param bugs.
-    if std::env::var("FORCE_PD").is_ok() {
+    if crate::env_is_set!("FORCE_PD") {
         if let Ok(o) = std::fs::read(&crate::av2_recon::cap_path("dav_f2postdeblk.yuv")) {
             for i in 0..(w * h) { pl0[i] = o[i] as i32; }
             for i in 0..(cw * ch) { pl1[i] = o[w * h + i] as i32; pl2[i] = o[w * h + cw * ch + i] as i32; }
@@ -1901,7 +1891,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     let deblk_v = pl2.clone();
 
     // env OH1PD: dump the POST-DEBLOCK planes for the oh=1 frame (filter-stage A/B vs dav PD1).
-    if std::env::var("MDBW").is_ok() {
+    if crate::env_is_set!("MDBW") {
         let oh = crate::av2_recon::CUR_FRAME_REF.with(|c| c.get().0);
         dump_frame2_luma_wmap(&(crate::av2_recon::cap_path(&format!("mine_oh{oh}_wmap.bin"))));
         crate::av2_deblock::QMAP.with(|w| {
@@ -1914,21 +1904,18 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             }
         });
     }
-    if std::env::var("OH1PD").is_ok() {
+    if crate::env_is_set!("OH1PD") {
         let mut out = Vec::new();
         for y in 0..h {
             if !crate::av2_recon::work_tick("frm:1716") { break; }
             for x in 0..w {
-                if !crate::av2_recon::work_tick("frm:1717") { break; }
                 out.push(pl0[y * w + x] as u8);
             }
         }
         for p in [&pl1, &pl2] {
             if !crate::av2_recon::work_tick("frm:1721") { break; }
             for y in 0..ch {
-                if !crate::av2_recon::work_tick("frm:1722") { break; }
                 for x in 0..cw {
-                    if !crate::av2_recon::work_tick("frm:1723") { break; }
                     out.push(p[y * cw + x] as u8);
                 }
             }
@@ -1943,7 +1930,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         let f = fr.borrow();
         (f.cdef_idx.clone(), f.cdef_sbw, f.noskip.clone())
     });
-    if ccfg.enabled && !cdef_idx.is_empty() && std::env::var("NOCDEF").is_err() {
+    if ccfg.enabled && !cdef_idx.is_empty() && !crate::env_is_set!("NOCDEF") {
         // Levels and damping scale with bitdepth (dav2d cdef_apply_tmpl.c:106-111, 280-288).
         let bd_min8 = (bdmax + 1).trailing_zeros() as i32 - 8;
         let damping = ccfg.damping + bd_min8;
@@ -1951,7 +1938,6 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         for by4 in (0..ih4).step_by(2) {
             if !crate::av2_recon::work_tick("frm:1743") { break; }
             for bx4 in (0..iw4).step_by(2) {
-                if !crate::av2_recon::work_tick("frm:1744") { break; }
                 let sb = (by4 >> 4) * cdef_sbw + (bx4 >> 4);
                 let ci = cdef_idx[sb];
                 if ci < 0 {
@@ -2013,7 +1999,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         }
     }
 
-    if std::env::var("CFGDBG").is_ok() {
+    if crate::env_is_set!("CFGDBG") {
         crate::dlog!("[MINECFG] cdef damping={} n_str={} on_skiptx={} y_str={:?} uv_str={:?}", ccfg.damping, ccfg.n_strengths, ccfg.on_skiptx, &ccfg.y_strength[..ccfg.n_strengths], &ccfg.uv_strength[..ccfg.n_strengths]);
         FRAME.with(|fr| {
             let f = fr.borrow();
@@ -2055,7 +2041,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     // Write the MERGED map back so this frame's slot save carries the complete flags (a later
     // frame's sb_reuse chain — e.g. key → reshow → P — reads them from the slot).
     FRAME.with(|fr| fr.borrow_mut().ccso_blk = ccso_blk.clone());
-    if std::env::var("CFGDBG").is_ok() {
+    if crate::env_is_set!("CFGDBG") {
         for pl in 0..3 {
             let p = &sccfg.p[pl];
             let on_sbs = (0..ccso_n256).filter(|&b| ccso_blk.get(pl * ccso_n256 + b).copied().unwrap_or(false)).count();
@@ -2064,7 +2050,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             crate::dlog!("[MINECFG] ccso pl={pl} en={} bo_only={} mbl2={} ON_SBS={on_sbs}/{ccso_n256} band_off={bands:?}", p.enabled, p.bo_only, p.max_band_log2);
         }
     }
-    if sccfg.enabled && std::env::var("NOCCSO").is_err() {
+    if sccfg.enabled && !crate::env_is_set!("NOCCSO") {
         let (hi, wi) = (h as i32, w as i32);
         let cl = |v: i32, m: i32| v.clamp(0, m - 1);
         for pl in 0..3usize {
@@ -2090,28 +2076,31 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
             let shift = bd.saturating_sub(pc.max_band_log2);
             let (dy, dx) = (CCSO_POS[pc.ext_filter][0] as i32, CCSO_POS[pc.ext_filter][1] as i32);
             let q = pc.quant_step;
+            let ccsodbg = crate::env_is_set!("CCSODBG");
             for py in 0..ph {
                 if !crate::av2_recon::work_tick("frm:1880") { break; }
+                // Everything that depends only on the row, once per row.
+                let ly = (py << ss_ver) as i32;
+                let blk_row = pl * ccso_n256 + ((ly >> ccso_sh) as usize) * ccso_col256;
+                let (rc, r0, r1) = (ly * wi, cl(ly + dy, hi) * wi, cl(ly - dy, hi) * wi);
                 for px in 0..pw {
-                    if !crate::av2_recon::work_tick("frm:1881") { break; }
-                    let (lx, ly) = ((px << ss_hor) as i32, (py << ss_ver) as i32);
-                    let block = ((ly >> ccso_sh) as usize) * ccso_col256 + ((lx >> ccso_sh) as usize);
-                    if !ccso_blk[pl * ccso_n256 + block] {
+                    let lx = (px << ss_hor) as i32;
+                    if !ccso_blk[blk_row + ((lx >> ccso_sh) as usize)] {
                         continue;
                     }
-                    let center = deblk_luma[(ly * wi + lx) as usize];
+                    let center = deblk_luma[(rc + lx) as usize];
                     let band = if single_band { 0 } else { center >> shift };
                     let (cls0, cls1) = if pc.bo_only {
                         (0u32, 0u32)
                     } else {
-                        let n0 = deblk_luma[(cl(ly + dy, hi) * wi + cl(lx + dx, wi)) as usize];
-                        let n1 = deblk_luma[(cl(ly - dy, hi) * wi + cl(lx - dx, wi)) as usize];
+                        let n0 = deblk_luma[(r0 + cl(lx + dx, wi)) as usize];
+                        let n1 = deblk_luma[(r1 + cl(lx - dx, wi)) as usize];
                         (ccso_score(n0 - center, q, pc.edge_clf), ccso_score(n1 - center, q, pc.edge_clf))
                     };
                     let lut = ((band as usize) << 4) | ((cls0 as usize) << 2) | (cls1 as usize);
                     let offset = pc.filter_offset.get(lut).copied().unwrap_or(0) as i32;
                     let idx = py * pw + px;
-                    if std::env::var("CCSODBG").is_ok() && pl == 0 && py == 0 && (px == 338 || px == 167) {
+                    if ccsodbg && pl == 0 && py == 0 && (px == 338 || px == 167) {
                         crate::dlog!("[MCCSOA] px={px} src={center} band={band} cls={cls0},{cls1} off={offset} dst_in={} thr={q} shift={shift} bo={} eclf={} ext={}", out[idx], pc.bo_only as u8, pc.edge_clf as u8, pc.ext_filter);
                     }
                     out[idx] = (out[idx] + offset).clamp(0, bdmax);
@@ -2130,7 +2119,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     // (post-CCSO) snapshot with post-deblock stripe-boundary rows; GDF's guided input
     // stays PRE-wiener (dav lr_stripe: gdf_prep before wiener, gdf_add after). ----
     let mut lr_src: Option<Vec<i32>> = None;
-    if crate::av2_lr::LR_CFG.with(|c| c.borrow().enabled()) && std::env::var("NOLR").is_err() {
+    if crate::av2_lr::LR_CFG.with(|c| c.borrow().enabled()) && !crate::env_is_set!("NOLR") {
         let (lr_noskip, f_iw4) = FRAME.with(|fr| {
             let f = fr.borrow();
             (f.lr_noskip.clone(), f.iw4)
@@ -2156,7 +2145,7 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
         lr_src = Some(src);
     }
     // ---- 4. GDF (luma only: PRE-wiener guided input, post-deblock reference) ----
-    let gcfg = if std::env::var("NOGDF").is_ok() { GdfCfg { enabled: false, ..GDF_CFG.with(|c| c.get()) } } else { GDF_CFG.with(|c| c.get()) };
+    let gcfg = if crate::env_is_set!("NOGDF") { GdfCfg { enabled: false, ..GDF_CFG.with(|c| c.get()) } } else { GDF_CFG.with(|c| c.get()) };
     let gdf_blk = FRAME.with(|fr| fr.borrow().gdf_blk.clone());
     if gcfg.enabled {
         let mut out = pl0.clone();
@@ -2168,13 +2157,20 @@ pub fn filter_frame_chain(gdf_ref_dst: usize) {
     }
 
     // MFIN: per-decode-frame FINAL dump (mirrors dav DFINDUMP — covers hidden frames).
-    if std::env::var("MFIN").is_ok() && !tip_output {
+    if crate::env_is_set!("MFIN") && !tip_output {
         thread_local! { static FIN_N: std::cell::Cell<u32> = const { std::cell::Cell::new(0) }; }
         let n = FIN_N.with(|c| { let v = c.get(); c.set(v + 1); v });
         let (vw, vh, vcw, vch) = FRAME.with(|fr| fr.borrow().crop);
         let mut out: Vec<u8> = Vec::with_capacity(w * h * 3 / 2);
         for (p, stride, pw, ph) in [(&pl0, w, vw, vh), (&pl1, cw, vcw, vch), (&pl2, cw, vcw, vch)] {
-            out.extend(crop_plane(p, stride, pw, ph).iter().map(|v| (*v).clamp(0, 255) as u8));
+            // 16-bit little-endian at high bit depth, matching avmdec's dumps.
+            for v in crop_plane(p, stride, pw, ph) {
+                if bdmax > 255 {
+                    out.extend_from_slice(&(v.clamp(0, bdmax) as u16).to_le_bytes());
+                } else {
+                    out.push(v.clamp(0, 255) as u8);
+                }
+            }
         }
         let _ = std::fs::write((crate::av2_recon::cap_path(&format!("mine_fin_{n}.yuv"))), &out);
     }

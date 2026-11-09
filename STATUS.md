@@ -7,7 +7,7 @@
 ## What is verified
 
 Every clip in a **69-clip conformance corpus** decodes **byte-identical** to AOM's
-`avmdec`. The suite also runs 125 unit/integration tests. Both gate every change.
+`avmdec`. The suite also runs 129 unit/integration tests. Both gate every change.
 The nine 130-frame real-content streams from
 [issue #14](https://github.com/Remade-With-Rust/rusty_av2d/issues/14) also matched
 when that issue was fixed; they aren't vendored, so the gate doesn't rerun them.
@@ -37,9 +37,11 @@ dimensions that are not multiples of 8, including odd ones, in 8-bit 4:2:0.
 2. **AV2 is not a finalized standard.** There are no official conformance
    vectors. "Correct" here means bit-exact against AVM/dav2d as of this commit;
    the bitstream may still change.
-3. **Performance is unoptimized.** Correctness was the only goal. The decoder
-   is fully scalar: no SIMD and no assembly (the inherited `rav1d` assembly was
-   dead code for AV2 and has been removed). Profiled, the classic vectorizable
+3. **Performance is young.** Correctness came first. There is no assembly (the
+   inherited `rav1d` assembly was dead code for AV2 and has been removed). Motion
+   compensation's 8-tap filters and compound blends run runtime-dispatched
+   AVX2/NEON kernels (`src/simd.rs`, `RUSTY_AV2D_NOSIMD=1` opts out); everything
+   else is scalar. Profiled, the classic vectorizable
    kernels are only ~26% of runtime; most of the cost is the recon data path,
    where samples are stored one-per-`i32` and bounds-checked per access. The
    `work_tick` hardening guards were suspected to matter and measured not to
@@ -49,11 +51,15 @@ dimensions that are not multiples of 8, including odd ones, in 8-bit 4:2:0.
    (all silent unless `RUSTY_AV2D_DEBUG=1`).
 5. **Threading is under-tested.** Correctness is gated single-threaded;
    multi-threaded output has only been spot-checked.
-6. **Formats other than 8-bit 4:2:0 are thinly verified, and known to fail on
-   some streams.** Eight-frame `--cpu-used=6 --qp=160` clips at 272x152 from
-   `mksrc.py` differ from `avmdec` in 10-bit, 4:2:2 and 4:4:4, and decoding a
-   `--monochrome` clip panics. The corpus clips for these formats pass, but they
-   do not reach whatever these streams use. Treat these formats as unproven.
+6. **Formats other than 8-bit 4:2:0 rest on few clips.** Ten-bit, 4:2:2 and
+   4:4:4 each failed on a 272x152 `--cpu-used=6 --qp=160` clip from `mksrc.py`
+   until five bugs were fixed (10-bit compound mask shift; 4:2:2 inter tx-type
+   context at the frame edge; 4:4:4 CfL context, MHCCP corners and BAWP edge
+   templates). Those clips and their 270x150 counterparts now match `avmdec`
+   byte for byte, along with the corpus's one clip per format. That is still
+   only a handful of streams per format, so expect more gaps there than in
+   8-bit 4:2:0. Monochrome (`--monochrome`) is refused with an error. 12-bit is
+   untested.
 7. **Some tools are refused.** These return an error and a non-zero CLI exit
    rather than emit wrong pixels: segmentation (`--aq-mode`), frames coding
    non-identity global motion, `--disable-loopfilters-across-tiles=1` with more

@@ -219,6 +219,8 @@ pub fn lr_filter_luma(
     };
 
     let mut out_rows: Vec<i32> = vec![0; w]; // scratch per row
+    // The (stripe x strip) neighbourhood, prefetched through `px` (see `WIN_R`).
+    let mut win: Vec<i32> = Vec::new();
 
     // Iterate stripes × 64-col strips (the strip only matters for classification's
     // noskip-window clamp — pixel access is global thanks to the snapshot).
@@ -270,6 +272,19 @@ pub fn lr_filter_luma(
             }
             // With frame filters off each unit codes its own (see LR_UNIT_FILTERS).
             let ns_filters = if pd.ffon { &pd.filter } else { unit_filters.get(&(0u8, ax, ay)).unwrap_or(&pd.filter) };
+            // `px` is a pure function of (x, y) within the stripe, so fetch the strip's
+            // neighbourhood once: the filter reaches 4 samples out and the classifier's 6x6
+            // gradient window up to 5, and WIN_R covers both. The taps then index `win` directly.
+            const WIN_R: usize = 8;
+            let (wx0, wy0) = (x0 as i32 - WIN_R as i32, sy0 as i32 - WIN_R as i32);
+            let (ww, wh) = (sw + 2 * WIN_R, sy1 - sy0 + 2 * WIN_R);
+            win.clear();
+            for yy in 0..wh as i32 {
+                for xx in 0..ww as i32 {
+                    win.push(px(wx0 + xx, wy0 + yy));
+                }
+            }
+            let px = |x: i32, y: i32| -> i32 { win[(y - wy0) as usize * ww + (x - wx0) as usize] };
             // classification (PC-wiener or multi-class NS): per 4px block of the strip.
             let multi = u_type == REST_PC || (u_type == REST_NS && pd.num_classes > 1);
             let bh_blk = (sy1 - sy0).div_ceil(4);
@@ -417,7 +432,7 @@ pub fn lr_filter_chroma(
     if pd.r_type == REST_NONE {
         return;
     }
-    if std::env::var("MLRU").is_ok() {
+    if crate::env_is_set!("MLRU") {
         crate::dlog!("[MLRC] p={p} ds_type={ds_type} ffon={} ncls={} unit={} cw={cw} ch={ch}", pd.ffon as u8, pd.num_classes, 1usize << cfg.unit_size[1]);
     }
     let unit_sz_log2 = cfg.unit_size[1] as usize;
@@ -433,6 +448,8 @@ pub fn lr_filter_chroma(
             (s0, (s0 + band).min(ch))
         }
     };
+    // Per-unit neighbourhoods of the chroma plane and of the downsampled luma (see WIN_R).
+    let (mut win_c, mut win_l): (Vec<i32>, Vec<i32>) = (Vec::new(), Vec::new());
     let mut y0 = 0usize;
     while y0 < ch {
         if !crate::av2_recon::work_tick("av2_lr:chroma_stripe") { break; }
@@ -543,6 +560,21 @@ pub fn lr_filter_chroma(
                     continue;
                 }
             };
+            // `px` and `dsl` are pure functions of (x, y) inside the stripe: fetch the unit's
+            // neighbourhood once (both tap sets reach 2 samples; WIN_R covers that) and index it.
+            const WIN_R: usize = 4;
+            let (wx0, wy0) = (x0 as i32 - WIN_R as i32, sy0 as i32 - WIN_R as i32);
+            let (ww, wh) = (x1 - x0 + 2 * WIN_R, sy1 - sy0 + 2 * WIN_R);
+            win_c.clear();
+            win_l.clear();
+            for yy in 0..wh as i32 {
+                for xx in 0..ww as i32 {
+                    win_c.push(px(wx0 + xx, wy0 + yy));
+                    win_l.push(dsl(wx0 + xx, wy0 + yy));
+                }
+            }
+            let px = |x: i32, y: i32| -> i32 { win_c[(y - wy0) as usize * ww + (x - wx0) as usize] };
+            let dsl = |x: i32, y: i32| -> i32 { win_l[(y - wy0) as usize * ww + (x - wx0) as usize] };
             for y in sy0..sy1 {
                 for x in x0..x1 {
                     let m = px(x as i32, y as i32);
@@ -789,11 +821,11 @@ pub fn read_lr_units_sb(
         let lruh = 1usize.max((th - fy + half).min(sbh) >> usz_log2);
         for y in 0..lruh {
             for x in 0..lruw {
-                if std::env::var("MLRU").is_ok() {
+                if crate::env_is_set!("MLRU") {
                     crate::dlog!("[MLRUPRE] p={p} unit=({},{}) rng={} nscdf={}", fx + (x << usz_log2), fy + (y << usz_log2), msac.rng, cdf.m.rst_ns_wiener[0]);
                 }
                 let t = read_restoration_info(msac, cdf, p, frame_type);
-                if std::env::var("MLRU").is_ok() {
+                if crate::env_is_set!("MLRU") {
                     crate::dlog!("[MLRU] p={p} unit=({},{}) type={t} rng={}", fx + (x << usz_log2), fy + (y << usz_log2), msac.rng);
                 }
                 LR_UNITS.with(|u| {
@@ -801,7 +833,7 @@ pub fn read_lr_units_sb(
                 });
                 if t == REST_NS && !cfg.p[p].ffon {
                     let snap = NS_BANK.with(|b| b.borrow()[p].filter[4]);
-                    if p > 0 && std::env::var("MLRU").is_ok() {
+                    if p > 0 && crate::env_is_set!("MLRU") {
                         crate::dlog!("[MLRF] p={p} unit=({},{}) taps={:?}", fx + (x << usz_log2), fy + (y << usz_log2), &snap[0][..18]);
                     }
                     LR_UNIT_FILTERS.with(|u| {

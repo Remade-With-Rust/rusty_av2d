@@ -259,8 +259,17 @@ pub fn cdef_block(
     let x_end: isize = if have_right { w as isize + 2 } else { w as isize };
     let base = 2 * TS + 2;
     let ins = in_stride as isize;
+    let n = (x_end - x_start) as usize;
     for dy in y_start..y_end {
         if !crate::av2_recon::work_tick("filter:258") { break; }
+        let src0 = in_off as isize + dy * ins + x_start;
+        let ti0 = base + dy * TS + x_start;
+        // The whole row in range on both sides (every valid block): one slice copy.
+        if src0 >= 0 && ti0 >= 0 && ti0 as usize + n <= tmp.len() && src0 as usize + n <= input.len() {
+            let (s, t) = (src0 as usize, ti0 as usize);
+            tmp[t..t + n].copy_from_slice(&input[s..s + n]);
+            continue;
+        }
         for dx in x_start..x_end {
             let src = (in_off as isize + dy * ins + dx) as usize;
             let ti = (base + dy * TS + dx) as usize;

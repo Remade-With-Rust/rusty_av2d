@@ -331,7 +331,7 @@ pub fn deblock_plane(
             let band_top = dy == 0;
             for x4 in 0..iw4 {
                 let cell = y4 * iw4 + x4;
-                if std::env::var("DBQ13").is_ok() && x4 == 13 && y4 == 16 {
+                if crate::env_is_set!("DBQ13") && x4 == 13 && y4 == 16 {
                     crate::dlog!("[DBQ13] rows pass reached (13,16): db_top={} lh={} lh_above={} apply_h={apply_h} mwlen={}", db_top[cell], db_lh[cell], db_lh[cell - iw4], max_width.len());
                 }
                 if !db_top[cell] {

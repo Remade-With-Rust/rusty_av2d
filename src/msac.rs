@@ -217,7 +217,7 @@ pub mod symtrace {
         if line.starts_with('S') {
             static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if std::env::var("SYMBT").is_ok_and(|v| v.parse() == Ok(n)) {
+            if crate::env_get!("SYMBT").is_some_and(|v| v.parse() == Ok(n)) {
                 eprintln!("[SYMBT] {n}: {line}{}", std::backtrace::Backtrace::force_capture());
             }
         }
@@ -335,7 +335,7 @@ fn rav1d_msac_decode_bool_rust(s: &mut MsacContext, f: c_uint) -> bool {
     dif -= (ret as EcWin) * vw;
     v = v.wrapping_add((ret as c_uint) * (r.wrapping_sub(2 * v)));
     ctx_norm(s, dif, v);
-    symtrace!("S {}\n", s.rng);
+    symtrace!("S {} {}\n", s.rng, (!ret) as u32);
     !ret
 }
 
@@ -450,7 +450,7 @@ fn rav1d_msac_decode_symbol_adapt_rust(s: &mut MsacContext, cdf: &mut [u16], n_s
         s.dif.wrapping_sub((v as EcWin) << (EC_WIN_SIZE - 16)),
         u - v,
     );
-    symtrace!("S {}\n", s.rng);
+    symtrace!("S {} {}\n", s.rng, val);
     if s.allow_update_cdf() {
         // AV2 table-driven rate (dav2d) + (n>2) bump; count slot holds rate-ctx<<8|count.
         let pc = cdf[n_symbols as usize];
