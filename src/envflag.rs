@@ -7,14 +7,26 @@
 
 use std::sync::OnceLock;
 
-/// The environment, sorted by name. A sorted `Vec` rather than a `HashMap`: lookups happen once
-/// per call site, and a randomly seeded hash made the decoder's instruction count vary run to run.
+/// An environment variable name as the OS compares it: Windows names are case-insensitive
+/// (`std::env::var("PATH")` finds `Path`), elsewhere they are exact.
+fn key(name: &str) -> std::borrow::Cow<'_, str> {
+    if cfg!(windows) {
+        std::borrow::Cow::Owned(name.to_uppercase())
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
+}
+
+/// The environment, sorted by (OS-compared) name. A sorted `Vec` rather than a `HashMap`: lookups
+/// happen once per call site, and a randomly seeded hash made the decoder's instruction count vary
+/// run to run.
 fn snapshot() -> &'static [(String, String)] {
     static ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
     ENV.get_or_init(|| {
         // Like `std::env::var`, a name or value that is not valid Unicode reads as unset.
-        let mut v: Vec<(String, String)> =
-            std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect();
+        let mut v: Vec<(String, String)> = std::env::vars_os()
+            .filter_map(|(k, v)| Some((key(&k.into_string().ok()?).into_owned(), v.into_string().ok()?)))
+            .collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
         v
     })
@@ -22,7 +34,8 @@ fn snapshot() -> &'static [(String, String)] {
 
 fn find(name: &str) -> Option<&'static str> {
     let env = snapshot();
-    env.binary_search_by(|(k, _)| k.as_str().cmp(name)).ok().map(|i| env[i].1.as_str())
+    let name = key(name);
+    env.binary_search_by(|(k, _)| k.as_str().cmp(&name)).ok().map(|i| env[i].1.as_str())
 }
 
 /// Whether `name` is set: `std::env::var(name).is_ok()`. Use [`env_is_set!`](crate::env_is_set)
@@ -70,5 +83,7 @@ mod tests {
         assert_eq!(crate::env_is_set!("PATH"), std::env::var("PATH").is_ok());
         assert_eq!(crate::env_get!("PATH"), std::env::var("PATH").ok().as_deref());
         assert!(!crate::env_is_set!("RUSTY_AV2D_SURELY_UNSET_7f3a"));
+        // Windows compares names case-insensitively; std does, so must we.
+        assert_eq!(super::get("path"), std::env::var("path").ok().as_deref());
     }
 }
