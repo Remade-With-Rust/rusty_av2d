@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.1](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.3.0...rusty_av2d-v0.3.1) - 2026-11-10
+
+### Fixed
+
+- *(envflag)* compare variable names case-insensitively on Windows
+
+### Other
+
+- 2,589 active installs
+
 ## [0.3.0](https://github.com/Remade-With-Rust/rusty_av2d/compare/rusty_av2d-v0.2.13...rusty_av2d-v0.3.0) - 2026-11-08
 
 Real `avmenc` streams now decode correctly, and decoding is 2.7–3.8× faster.
